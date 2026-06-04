@@ -34,9 +34,9 @@ import java.util.concurrent.TimeUnit;
  * Docker Swarm 环境下的分布式优雅停机管理器
  * 
  * 核心流程：
- * 1. 健康检查返回 503，让 Swarm/Traefik 剔除当前实例
+ * 1. 健康检查返回 503，让 Nginx 反向代理不再转发流量到当前实例
  * 2. 从 Nacos 注册中心注销
- * 3. 等待 Swarm VIP / Feign 客户端缓存过期（15秒）
+ * 3. 等待 Nginx DNS 缓存和 Feign 客户端缓存过期（15秒）
  * 4. Spring Boot graceful shutdown 处理完当前 HTTP 请求
  * 5. 停止内部组件（Kafka、线程池、定时任务）
  * 6. 释放分布式资源（Redis 锁等）
@@ -91,14 +91,14 @@ public class SwarmGracefulShutdown implements ApplicationListener<ContextClosedE
         log.info("========== 开始分布式优雅停机（Swarm 环境）==========");
         
         try {
-            // Step 1: 健康检查返回 503，让 Swarm/Traefik 不再路由流量
+            // Step 1: 健康检查返回 503，让 Nginx 反向代理不再路由流量
             step1_markShuttingDown();
             
             // Step 2: 从 Nacos 注册中心注销（阻止 Feign 客户端发现此实例）
             step2_deregisterFromNacos();
             
-            // Step 3: 等待 Swarm VIP 和 Feign 客户端缓存过期
-            // Swarm VIP 刷新有延迟，Feign/Ribbon 默认缓存 30 秒
+            // Step 3: 等待 Nginx DNS 缓存和 Feign 客户端缓存过期
+            // Nginx resolver 默认缓存 5s，Feign/Ribbon 默认缓存 30 秒
             step3_waitForTrafficDrain(15000);
             
             // Step 4: 等待 Spring Boot 处理完当前 HTTP 请求
@@ -134,7 +134,7 @@ public class SwarmGracefulShutdown implements ApplicationListener<ContextClosedE
     }
     
     private void step3_waitForTrafficDrain(long millis) {
-        log.info("[Step 3/6] 等待 {}ms，让 Swarm VIP 和 Feign 缓存过期...", millis);
+        log.info("[Step 3/6] 等待 {}ms，让 Nginx DNS 缓存和 Feign 缓存过期...", millis);
         try {
             Thread.sleep(millis);
         } catch (InterruptedException e) {
@@ -504,12 +504,6 @@ services:
           cpus: '0.5'
           memory: 512M
       
-      # 部署标签（可选）
-      labels:
-        - "traefik.enable=true"
-        - "traefik.http.routers.app.rule=Host(`api.yourcompany.com`)"
-        - "traefik.http.services.app.loadbalancer.server.port=8080"
-    
     # 【关键】优雅停机等待时间，必须大于 timeout-per-shutdown-phase
     stop_grace_period: 60s
     
@@ -525,42 +519,129 @@ services:
       retries: 3
       start_period: 60s       # 启动后60秒内不计入失败
 
-  # 可选：Traefik 作为入口网关，比 Swarm 内置 VIP 更可控
-  traefik:
-    image: traefik:v2.10
-    command:
-      - "--api.dashboard=true"
-      - "--providers.docker.swarmMode=true"
-      - "--providers.docker.exposedbydefault=false"
-      - "--entrypoints.web.address=:80"
-      - "--entrypoints.web.transport.respondingTimeouts.idleTimeout=30s"
-      - "--ping=true"
+  # Nginx 入口网关（利用 Swarm 内置 DNS 动态解析服务名）
+  nginx:
+    image: nginx:alpine
     ports:
       - target: 80
         published: 80
         mode: host
-      - target: 8080
-        published: 8080
-        mode: host
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+    configs:
+      - source: nginx_conf
+        target: /etc/nginx/nginx.conf
     networks:
       - backend
     deploy:
-      mode: global
+      mode: global           # 每个节点一个 Nginx
       placement:
         constraints:
-          - node.role == manager
-      labels:
-        - "traefik.enable=true"
-        - "traefik.http.routers.traefik.rule=Host(`traefik.yourcompany.com`)"
-        - "traefik.http.routers.traefik.service=api@internal"
+          - node.labels.nginx == true
+      restart_policy:
+        condition: any
+
+configs:
+  nginx_conf:
+    external: true           # 事先通过 docker config create nginx_conf nginx.conf 创建
 
 networks:
   backend:
     driver: overlay
     attachable: true
 ```
+
+### nginx.conf（Nginx 核心配置）
+
+```nginx
+# nginx.conf - 用于 Docker Swarm 环境的动态服务发现
+# 关键原理：使用 Swarm 内置 DNS (127.0.0.11) + 变量延迟解析
+
+events {
+    worker_connections 1024;
+    use epoll;
+    multi_accept on;
+}
+
+http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+
+    log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                    '$status $body_bytes_sent "$http_referer" '
+                    '"$http_user_agent" "$http_x_forwarded_for" '
+                    'upstream=$upstream_addr response_time=$upstream_response_time';
+
+    access_log /var/log/nginx/access.log main;
+    error_log /var/log/nginx/error.log warn;
+
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 65;
+    types_hash_max_size 2048;
+
+    # 【关键】使用 Swarm 内置 DNS，5秒刷新缓存
+    # 127.0.0.11 是 Docker Swarm Overlay Network 的嵌入式 DNS
+    resolver 127.0.0.11 valid=5s ipv6=off;
+
+    # 上游服务配置
+    upstream app_backend {
+        # 【关键】使用 server 指令配合 resolve 参数
+        # 或者直接使用变量方式（推荐，见下方 location）
+        server your-service:8080;
+    }
+
+    server {
+        listen 80;
+        server_name api.yourcompany.com;
+
+        # 健康检查端点（Nginx 自身状态）
+        location /nginx-health {
+            access_log off;
+            return 200 "healthy\n";
+            add_header Content-Type text/plain;
+        }
+
+        location / {
+            # 【关键】必须使用变量！Nginx 才会在运行时解析 DNS
+            # 直接写 proxy_pass http://your-service:8080; 只会启动时解析一次
+            set $backend "http://your-service:8080";
+            proxy_pass $backend;
+
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+
+            proxy_connect_timeout 5s;
+            proxy_send_timeout 10s;
+            proxy_read_timeout 10s;
+
+            # 【关键】当后端返回 503（应用正在停机）时，自动重试其他实例
+            proxy_next_upstream error timeout http_503 http_502;
+            proxy_next_upstream_tries 2;
+        }
+    }
+
+    # 可选：静态资源缓存层
+    server {
+        listen 80;
+        server_name static.yourcompany.com;
+
+        location / {
+            root /var/www/static;
+            expires 30d;
+            add_header Cache-Control "public, immutable";
+        }
+    }
+}
+```
+
+> ⚠️ **重要提醒**：`proxy_pass` 必须使用变量（`set $backend`），Nginx 才会在每次请求时重新解析 DNS。直接写 `proxy_pass http://your-service:8080;` 只会在启动时解析一次，容器 IP 变化后将无法感知。
+
+> 创建 config：
+> ```bash
+> docker config create nginx_conf nginx.conf
+> ```
 
 ---
 
@@ -622,6 +703,7 @@ docker logs $CONTAINER_ID
 | `healthcheck.start_period` | `60s` | 启动宽限期 |
 | Nacos `heart-beat-timeout` | `10s` | Nacos 判定实例死亡时间 |
 | Feign `ttl` | `5s` | 负载均衡缓存刷新 |
+| Nginx `valid` | `5s` | DNS 缓存刷新时间 |
 
 ---
 
@@ -636,8 +718,16 @@ docker logs $CONTAINER_ID
 **解决**：缩短 `spring.cloud.loadbalancer.cache.ttl`，或增加 `step3_waitForTrafficDrain` 时间
 
 ### Q3: Nacos 注销了但服务还在被调用
-**原因**：Swarm VIP 刷新比 Nacos 慢  
-**解决**：健康检查返回 503 配合 `stop_grace_period` 双保险
+**原因**：Nginx DNS 缓存未过期  
+**解决**：① 确认 nginx.conf 中 `resolver 127.0.0.11 valid=5s;` 已生效 ② 确认 `proxy_pass` 使用了变量 `$backend` 而非直接写死 URL ③ 健康检查返回 503 配合 `stop_grace_period` 双保险
+
+### Q4: Nginx 启动时解析不到服务名
+**原因**：Swarm DNS 尚未就绪  
+**解决**：Nginx 配置中使用 `resolver 127.0.0.11 valid=5s;`，并在 `location` 中使用 `set $backend` 变量延迟解析
+
+### Q5: Nginx 容器无法访问 Swarm 服务
+**原因**：Nginx 和 app 服务不在同一 Overlay Network  
+**解决**：确保 docker-compose.yml 中所有服务都挂载了同一个 `backend` 网络
 
 ---
 
