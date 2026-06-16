@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "WebFetch(domain:www.techresume.io)"
+      "WebFetch(domain:www.techresume.io)",
+      "Bash(ls \"F:/ai/prepme\")",
+      "Bash(cat \"F:/ai/prepme/install.sh\")",
+      "Bash(bash ./install.sh)",
+      "Bash(cp \"C:/Users/admin/.claude/skills/prepme/assets/index.html\" \"f:/rag/index.html\")"
     ]
   }
 }
