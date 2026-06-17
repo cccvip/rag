@@ -2440,3 +2440,786 @@ Grafana 告警：LLM Token 消耗异常
     }
   ]
 };
+
+window.PREPME_ANSWERS["q1j31pxs"] = {
+  question: "你设计的流程引擎采用DAG编排+状态机驱动，这种架构有什么优势？",
+  level: "Core",
+  why: "CV: 自研应急安全领域流程引擎 → DAG + 状态机架构设计",
+  date: "2026-06-17",
+  answer: `<h2>最佳答案</h2>
+<p><strong>核心观点</strong>：DAG 解决的是<strong>节点之间如何依赖、如何编排</strong>的问题；状态机解决的是<strong>单个实例在生命周期中处于什么状态、如何推进</strong>的问题。两者结合，本质上是把<strong>静态拓扑结构</strong>和<strong>动态执行语义</strong>做了清晰分层。</p>
+<h3>1. 表达能力更强</h3>
+<p>相比线性流程 A → B → C，DAG 可以表达并行分支、汇聚合并、条件分支。在应急安全领域尤为关键，例如"应急指令下发"可同时触发通知责任人、锁定门禁、调取监控，再汇聚到"汇总反馈"。</p>
+<h3>2. 执行效率更高</h3>
+<p>通过拓扑排序识别无依赖节点，丢入不同 Worker 线程池并行执行，并按资源特性路由（轻量 IO / 重 IO / 阻塞等待），降低整体 wall-clock 时间。</p>
+<h3>3. 状态机提供清晰执行语义与容错基础</h3>
+<p>状态机让实例具备可持久化、可观测、可控制、可审计的能力。任意时刻知道实例处于 PENDING / RUNNING / COMPLETED / FAILED 哪个状态，服务崩溃后可基于持久化状态恢复。</p>
+<h3>4. 编译期校验 + 运行时轻量执行</h3>
+<p>DAG 在流程发布前可做环检测、孤立节点检测、参数校验、节点类型注册校验，运行时只需拓扑遍历和状态推进。</p>
+<h3>5. 业务逻辑与控制流解耦</h3>
+<p>节点只关心"我做什么"，引擎关心"什么时候调你、失败怎么办、超时怎么升级"。新增业务节点只需实现 Behavior 接口，流程变更只需改配置。</p>
+<h2>加分项</h2>
+<ul>
+<li><strong>Token 驱动视角</strong>：把 DAG 看成 Petri net，完成节点向后置节点抛 Token，节点收到所有前置 Token 才获得执行权，天然支持 AND-join / OR-join。</li>
+<li><strong>分层线程池 + "契约即意图"</strong>：Behavior 通过注解声明资源特性，引擎自动推导线程池路由、超时阈值、失败策略。</li>
+<li><strong>乐观锁 + 幂等执行</strong>：状态变更用主键 + version 乐观锁 UPDATE，节点执行记录表记录 PENDING/DISPATCHED/COMPLETED/TIMEOUT，支持 at-least-once 执行 + 引擎层去重。</li>
+<li><strong>多级超时升级链</strong>：超时不是简单失败，而是催办 → 升级上级 → 自动转交，升级链本身可作为 DAG 边语义扩展。</li>
+</ul>
+<h2>架构图</h2>
+<pre>
+┌─────────────────────────────────────────────┐
+│              流程定义层（静态）               │
+│  JSON/YAML DSL → DAG Compiler → Topology    │
+└─────────────────────────────────────────────┘
+                      │
+                      ▼
+┌─────────────────────────────────────────────┐
+│              调度执行层（动态）               │
+│  FlowDriver → State Machine → Token/Event    │
+│  单线程无锁调度    乐观锁持久化    驱动后续节点 │
+└─────────────────────────────────────────────┘
+                      │
+                      ▼
+┌─────────────────────────────────────────────┐
+│              业务执行层                      │
+│  Activity Behavior → 分层线程池 → 重试/超时/熔断│
+└─────────────────────────────────────────────┘
+                      │
+                      ▼
+┌─────────────────────────────────────────────┐
+│              持久化层                        │
+│  flow_instance → flow_node_execution → event_log│
+└─────────────────────────────────────────────┘
+</pre>`,
+  followups: [
+    {
+      q: "DAG的拓扑排序如何实现？",
+      answer: `<p>采用 <strong>Kahn 算法</strong>：先计算每个节点入度，把入度为 0 的节点入队；每次取出一个执行，执行完将其下游节点入度减 1，若减为 0 则入队。拓扑排序在<strong>流程发布期</strong>完成，运行时复用结果；排序失败说明有环，直接拒绝发布。</p>`
+    },
+    {
+      q: "如何处理循环依赖？",
+      answer: `<p>严格 DAG 不允许环，流程发布时做环检测，发现环直接拒绝。业务上的"循环"（如审批不通过打回重填）不破坏 DAG，而是交给<strong>状态机回退</strong>处理：DAG 只描述一次尝试内的节点拓扑，回退由状态机触发新的 DAG 执行。也可引入显式 Loop Node，把循环封装在节点内部。</p>`
+    },
+    {
+      q: "状态机的状态转换如何持久化？",
+      answer: `<p>采用<strong>同步写 DB + 乐观锁</strong>。每次状态转换执行主键 UPDATE，带 <code>AND status = currentStatus AND version = currentVersion</code>。持久化内容包括：flow_instance 表（实例状态、当前节点、version、tenant_id）、flow_node_execution 表（节点执行记录）、event_log（状态转换审计日志）。服务重启后扫描 RUNNING 实例，按节点类型恢复。</p>`
+    }
+  ]
+};
+
+window.PREPME_ANSWERS["ql5k1k5"] = {
+  "question": "你提到参考Netty EventLoop设计分片调度器，这种设计解决了什么问题？",
+  "level": "Advanced",
+  "source": "CV: 流程引擎分片调度",
+  "date": "2026-06-17",
+  "answer": `<h2>最佳答案</h2>
+<p><strong>核心观点</strong>：参考 Netty EventLoop 设计分片调度器，本质上是把<strong>"全局串行调度"拆成"多分片并行调度"</strong>，在保留单线程无锁优势的同时，解决<strong>单点瓶颈、租户热点扩散、锁竞争</strong>三个核心问题。</p>
+<h3>1. 解决调度层单点瓶颈</h3>
+<p>如果所有流程实例都扔进一个全局队列、由一个线程轮询调度，那么这个线程就是整个引擎的瓶颈：CPU 利用率上不去、调度延迟随实例数线性增长、一个实例的复杂计算会阻塞其他实例。</p>
+<p>Netty 的解决思路是每个 Channel 绑定一个 EventLoop，多个 EventLoop 并行处理连接。借鉴到流程引擎就是：按 <code>instance_id</code> 哈希把实例路由到不同分片，每个分片一个 EventLoop，调度能力随分片数线性扩展。</p>
+<h3>2. 解决单租户/单实例热点扩散</h3>
+<p>共享线程池的噩梦场景：某个租户突发流量，或者某个实例陷入死循环，占满调度线程，导致其他租户实例无法被调度。</p>
+<p>分片调度 + 单分片内串行执行后：一个实例永远只落在一个分片上；一个分片阻塞只影响落在这个分片上的实例；配合入口限流、熔断、租户级 fair polling，可以把异常控制在单个分片内部。</p>
+<h3>3. 消除锁竞争</h3>
+<p>Netty EventLoop 的核心好处是：同一个 Loop 内的事件处理是单线程的，不需要加锁。流程引擎中，状态机推进、DAG 遍历、Token 派发这些操作如果多线程并发执行，需要大量锁来保证状态一致性。</p>
+<p>分片后：每个分片内部单线程执行；同一个实例的状态变更天然串行；状态机推进不需要显式加锁；只有跨分片的操作（如全局配额、租户级限流）才需要少量同步。</p>
+<h3>4. 提供可预测的水平扩展</h3>
+<p>增加 Engine 节点时，每个节点运行相同数量的分片（<code>shardCount</code> 全局一致），整体调度能力线性增长。路由算法是确定性的：</p>
+<pre>shard = Math.floorMod(instanceId.hashCode(), shardCount)</pre>
+<p>同一个实例无论请求打到哪台机器，都会路由到同一个分片，保证状态推进的连续性。</p>
+<h3>5. 保证调度公平性</h3>
+<p>在单个分片内部，采用按租户轮询（tenant-level fair polling）：每个租户有自己的事件队列，EventLoop 每次从各租户队列中轮流取事件，避免某个租户的事件把分片队列塞满。</p>
+<h2>加分项</h2>
+<ul>
+<li><strong>shardCount 的选型有讲究</strong>：<code>CPU cores ~ CPU cores × 2</code>。分片太少无法发挥多核，太多则上下文切换和队列竞争增加。</li>
+<li><strong>shardCount 全局一致，变更需集群重启</strong>：分片数是一个全局契约。如果节点 A 有 8 个分片，节点 B 有 16 个分片，同一个 <code>instance_id</code> 在两台机器上会路由到不同分片，导致状态双写。</li>
+<li><strong>分片内部再加"租户 Lane"</strong>：L-tier 大客户有独立 VIP Lane，S/M/Trial 共享 tier group，冷租户 LRU 淘汰。大客户不会被小客户拖慢，小客户之间也有隔离。</li>
+<li><strong>分片饱和监控 + 自动告警</strong>：每个分片都有独立的队列深度、处理延迟、错误率监控。某个分片队列深度持续高于阈值，说明该分片上有热点实例或热点租户。</li>
+<li><strong>与 CPU 亲和性结合（进阶）</strong>：可以把 EventLoop 线程绑定到特定 CPU 核心，减少缓存失效和上下文切换。</li>
+</ul>
+<h2>架构图</h2>
+<pre>
+【单 EventLoop —— 全局瓶颈】
+┌─────────────────────────────────────┐
+│         Single EventLoop            │
+│  ┌─────┐┌─────┐┌─────┐┌─────┐     │
+│  │ T-A ││ T-B ││ T-C ││ T-A │ ... │
+│  └─────┘└─────┘└─────┘└─────┘     │
+│         所有租户/实例串行处理         │
+└─────────────────────────────────────┘
+              │
+              ▼
+         单线程 CPU 100%
+         一个热点拖垮全部
+
+【分片 EventLoop —— 并行隔离】
+┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐
+│Shard 0  │ │Shard 1  │ │Shard 2  │ │Shard 3  │
+│EventLoop│ │EventLoop│ │EventLoop│ │EventLoop│
+│T-A  T-B │ │T-C  T-D │ │T-A  T-E │ │T-B  T-F │
+└────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘
+     │           │           │           │
+     └───────────┴───────────┴───────────┘
+                4 核并行
+       一个分片阻塞不影响其他分片
+</pre>`,
+  "followups": [
+    {
+      "q": "分片数量如何确定？",
+      "answer": `<p>采用 <code>shardCount = CPU cores ~ CPU cores × 2</code> 的经验公式。分片数本质上是并行度：太少 CPU 核心用不满，太多则上下文切换开销上升、管理成本增加。4c8g 机器通常配 4~8 个分片。</p>
+<p>具体数值上线后根据 CPU 利用率、调度延迟、队列深度压测调整。关键是 <code>shardCount</code> 是所有节点共享的全局配置，修改必须全集群一起重启，否则同一个 <code>instance_id</code> 在不同节点会路由到不同分片，导致状态双写。</p>`
+    },
+    {
+      "q": "分片之间如何保证负载均衡？",
+      "answer": `<p>按 <code>instance_id</code> 哈希路由，分布是确定性的但不是绝对均衡的。如果某个租户有大量活跃实例，可能集中落在少数分片上。</p>
+<p>实际做法：</p>
+<ul>
+<li>哈希函数要够散（<code>Math.floorMod</code> 或 MurmurHash），避免聚集</li>
+<li>租户级 fair polling：单个分片内部，各租户队列轮流消费</li>
+<li>入口限流：按租户 QPS 限流，从源头削峰</li>
+<li>熔断兜底：某个租户错误率过高时熔断，释放分片资源</li>
+</ul>
+<p>如果确实需要跨分片 rebalance，成本很高：需要改变 <code>instance_id</code> 到分片的映射，意味着实例要迁移。所以我们更倾向于在分片内部做租户隔离，而不是动态分片迁移。</p>`
+    },
+    {
+      "q": "如何处理分片热点问题？",
+      "answer": `<p>分片热点分两种：</p>
+<ul>
+<li><strong>实例级热点</strong>：某个 <code>instance_id</code> 产生极高频事件（如死循环），只落在一个分片上，占满该分片的 EventLoop</li>
+<li><strong>租户级热点</strong>：某个租户整体流量暴增，实例可能分散在多个分片上，但也可能集中</li>
+</ul>
+<p>处理手段：</p>
+<ul>
+<li><strong>入口层</strong>：租户 QPS 限流，控制进入引擎的总流量</li>
+<li><strong>调度层</strong>：分片内租户 fair polling，防止单租户垄断分片</li>
+<li><strong>执行层</strong>：Semaphore + 熔断，限制单个租户并发执行数</li>
+<li><strong>监控层</strong>：分片队列深度/延迟告警，发现热点后人工介入</li>
+<li><strong>Scheduler Loop 守护</strong>：EventLoop 每次执行节点前检查本次执行是否超时，连续多个事件超时说明分片可能卡在热点实例上，可以标记告警甚至延迟处理后续事件</li>
+</ul>`
+    }
+  ]
+};
+
+window.PREPME_ANSWERS["qp2ihyr"] = {
+  "question": "你提到五层租户隔离机制，请详细解释每一层的作用。",
+  "level": "Advanced",
+  "source": "CV: 流程引擎五层租户隔离",
+  "date": "2026-06-17",
+  "answer": `<h2>最佳答案</h2>
+<p><strong>核心观点</strong>：五层租户隔离不是"五道独立的墙"，而是<strong>从入口到执行、从准入到兜底的纵深防御体系</strong>。每一层解决不同维度的问题：有的控制流量、有的控制调度、有的控制执行、有的控制资源总量、有的在故障时保护全局。</p>
+<h3>第一层：入口层 —— Redis 集中式令牌桶限流</h3>
+<p>在请求进入引擎之前，按租户维度做<strong>准入控制</strong>。每个租户有独立的 QPS 上限（Trial/S/M/L 套餐不同），使用 Redis + Lua 令牌桶实现跨机器共享的租户级限流。超过阈值的请求直接拒绝，不会进入后续链路。Redis 不可用时降级为本地令牌桶（Guava RateLimiter）。</p>
+<p><strong>解决的问题</strong>：防止单个租户突发流量洪峰直接冲垮引擎入口。</p>
+<h3>第二层：调度层 —— ShardedFlowScheduler 分片隔离</h3>
+<p>在 EventLoop 调度层面隔离租户影响范围。<code>shardCount = CPU cores ~ CPU×2</code>，按 <code>instance_id</code> 哈希路由到固定分片，每个分片内部是单线程无锁 EventLoop，分片内部采用租户级 fair polling，轮流消费各租户事件。</p>
+<p><strong>解决的问题</strong>：即使限流失效，某个租户的高频事件也只会影响它所在的分片，不会扩散到整个集群。</p>
+<h3>第三层：执行层 —— TieredFlowWorker 分层执行</h3>
+<p>在 Worker 线程池层面按租户等级分配执行资源：</p>
+<ul>
+<li><strong>L-tier（大客户）</strong>：独立 VIP Lane，每个大客户有专属线程池/队列</li>
+<li><strong>S/M/Trial</strong>：按套餐分组共享 tier group</li>
+<li><strong>LRU 淘汰</strong>：30 分钟无事件的冷租户释放其独占或共享资源</li>
+<li>队列满时执行快速失败 + 告警，不自动重试</li>
+</ul>
+<p><strong>解决的问题</strong>：防止大客户被小客户拖慢，也防止小客户中的异常流量占满全局线程池。</p>
+<h3>第四层：配额层 —— TenantInstanceQuota 实例配额</h3>
+<p>限制单租户在 DB 中的<strong>未完成实例总数</strong>。使用 Redis <code>HINCRBY</code> 分布式计数器，软限制告警、硬限制拒绝创建新实例，每 5 分钟与 DB 对账修正计数偏差。</p>
+<p><strong>解决的问题</strong>：防止某个租户无限创建实例导致 DB 单表膨胀、资源耗尽，也作为商业套餐区分的手段。</p>
+<h3>第五层：熔断层 —— TenantCircuitBreaker 租户熔断</h3>
+<p>当某个租户已经出现异常时，<strong>快速切断其新请求</strong>，保护其他租户和引擎自身。分级熔断：<code>CREATE</code> 操作超过阈值直接拒绝；<code>TRANSITION</code> / <code>QUERY</code> 通常允许，避免误伤正常查询。半开自动恢复 + 手动重置。</p>
+<p><strong>解决的问题</strong>：最后一道防线。当前面四层都拦不住时（如租户代码有 Bug 导致死循环、下游服务异常），熔断防止故障扩散。</p>
+<h2>加分项</h2>
+<ul>
+<li><strong>"五层"不是堆叠，而是分层失效（fail-soft）设计</strong>：每一层都是上一层的保险，组合起来让系统有韧性。</li>
+<li><strong>配额不是性能瓶颈，而是商业约束 + 数据治理</strong>：限制的是 DB 中未完成实例总数，不是内存对象数。</li>
+<li><strong>熔断是分级的一刀切</strong>：CREATE 拒绝防止新增伤害，TRANSITION/QUERY 继续允许，避免把正在运行的流程"冻死"在半路上。</li>
+<li><strong>Redis 计数 + DB 对账的配额设计</strong>：快速路径用缓存，最终一致性用 DB。</li>
+<li><strong>快速失败哲学贯穿所有层</strong>：每一层饱和策略都是 fast-fail + alert，不是自动重试。</li>
+</ul>
+<h2>架构图</h2>
+<pre>
+用户请求
+   │
+   ▼
+┌─────────────────────────────────────┐
+│ Layer 1: 入口限流                    │
+│ Redis Token Bucket per tenant       │
+│ 超限直接拒绝                          │
+└─────────────────────────────────────┘
+   │
+   ▼
+┌─────────────────────────────────────┐
+│ Layer 2: 调度分片                    │
+│ ShardedFlowScheduler                │
+│ instance_id → shard → EventLoop     │
+│ 分片内 tenant fair polling           │
+└─────────────────────────────────────┘
+   │
+   ▼
+┌─────────────────────────────────────┐
+│ Layer 3: 分层执行                    │
+│ TieredFlowWorker                    │
+│ L-tier: VIP Lane (per tenant)       │
+│ S/M/Trial: shared tier group        │
+│ cold tenant LRU eviction            │
+└─────────────────────────────────────┘
+   │
+   ▼
+┌─────────────────────────────────────┐
+│ Layer 4: 实例配额                    │
+│ TenantInstanceQuota                 │
+│ Redis HINCRBY + DB reconciliation   │
+│ 限制未完成实例总数                     │
+└─────────────────────────────────────┘
+   │
+   ▼
+┌─────────────────────────────────────┐
+│ Layer 5: 租户熔断                    │
+│ TenantCircuitBreaker                │
+│ CREATE reject / TRANSITION allow    │
+│ HALF-OPEN auto recovery             │
+└─────────────────────────────────────┘
+</pre>`,
+  "followups": [
+    {
+      "q": "大客户独立Lane如何实现？",
+      "answer": `<p>在 TieredFlowWorker 中为 L-tier 租户维护一个 <code>Map&lt;tenantId, ExecutorService&gt;</code>。每个大客户有独立的线程池和事件队列。当该租户有任务时，直接提交到它自己的线程池；当队列满时，只拒绝这个租户自己的任务，不影响其他租户。</p>
+<p>关键实现点：</p>
+<ul>
+<li>线程池隔离：<code>ConcurrentHashMap&lt;String, ThreadPoolExecutor&gt;</code>，key 是 tenant_id</li>
+<li>队列隔离：每个线程池有独立 BlockingQueue</li>
+<li>资源上限：L-tier 也有 semaphore 上限，防止无限增长</li>
+<li>生命周期：租户 30 分钟无任务，LRU 关闭其线程池</li>
+</ul>
+<p>独立 Lane 的代价是资源碎片化，所以只有 L-tier 享受这个待遇。如果 L-tier 客户太多，会评估合并到更大分组或横向扩容 Worker 节点。</p>`
+    },
+    {
+      "q": "冷租户LRU淘汰的具体策略？",
+      "answer": `<p>Worker 层维护一个按最近使用时间排序的租户资源映射。当某个租户超过 30 分钟没有新任务时，标记为 cold；如果总资源占用超过阈值，按 LRU 顺序回收其线程池和队列。</p>
+<p>注意：回收的是内存中的执行资源，不是实例状态。状态仍然在 DB 中，新事件到来时重新初始化资源即可。</p>
+<p>具体策略：</p>
+<ul>
+<li>空闲 30 分钟：标记为 cold，可淘汰</li>
+<li>内存资源紧张：优先淘汰 cold 租户</li>
+<li>新事件到达：重新创建线程池/队列，从 DB 恢复状态</li>
+<li>优雅关闭：先排空队列中已有任务，再释放资源</li>
+</ul>
+<p>LRU 淘汰要和租户等级结合。L-tier 的 VIP Lane 即使空闲也可能保留更久，因为大客户对延迟敏感，重建线程池有冷启动成本。</p>`
+    },
+    {
+      "q": "租户熔断的触发条件是什么？",
+      "answer": `<p>租户熔断基于多维度指标，不是单一条件。常见触发条件包括：单位时间内错误率超过阈值（如 50%）、连续失败次数超过阈值（如 10 次）、队列深度持续饱和、下游调用超时率激增等。</p>
+<p>分级策略：</p>
+<ul>
+<li><code>CREATE</code>（创建实例）：错误率过高时直接拒绝，防止新增异常实例</li>
+<li><code>TRANSITION</code>（状态推进）：通常不熔断，避免把正在运行的流程卡死</li>
+<li><code>QUERY</code>（查询）：通常允许，但可降级为只读缓存</li>
+</ul>
+<p>状态转换：CLOSED（正常）→ OPEN（熔断）→ HALF-OPEN（自动探测）→ CLOSED / OPEN。熔断开启后会自动进入半开状态，放少量请求探测是否恢复。同时提供手动重置接口。</p>`
+    }
+  ]
+};
+
+window.PREPME_ANSWERS["qqjrmq2"] = {
+  "question": "你设计的API网关基于Netty实现，日调用量7000W，单机7K并发，是如何实现的？",
+  "level": "Core",
+  "source": "CV: API网关项目",
+  "date": "2026-06-17",
+  "answer": `<h2>最佳答案</h2>
+<p><strong>核心观点</strong>：70M 日调用 / 7K 单机并发的网关，本质上是把<strong>同步阻塞的线程模型</strong>换成<strong>异步非阻塞的事件驱动模型</strong>。Netty 提供的高性能网络 IO 底座，加上合理的连接池、路由、限流、熔断设计，是支撑这个量级的关键。</p>
+<h3>1. 整体架构</h3>
+<p>网关基于 Netty 构建，核心分层：</p>
+<pre>
+客户端请求
+    │
+    ▼
+Netty Server
+  Boss EventLoopGroup (1 个线程，负责 accept)
+  Worker EventLoopGroup (N 个线程，N≈CPU核心数×2，负责 IO)
+    │
+    ▼
+ChannelPipeline
+  Decode → Auth → RateLimit → Route
+  → LoadBalance → Timeout → CircuitBreaker → Encode
+    │
+    ▼
+Upstream Connection Pool（与后端保持长连接）
+    │
+    ▼
+后端服务
+</pre>
+<h3>2. 如何支撑 7000W 日调用 / 7K 并发</h3>
+<p><strong>（1）异步非阻塞 IO</strong></p>
+<p>Netty 的 EventLoop 用少量线程处理大量连接。7K 并发不需要 7K 个线程，可能只需要几十个 EventLoop 线程。线程少了，上下文切换、内存占用、锁竞争都大幅下降。</p>
+<p><strong>（2）TCP 长连接 + 连接池</strong></p>
+<ul>
+<li>客户端到网关：HTTP Keep-Alive，复用连接</li>
+<li>网关到后端：维护与每个 upstream 实例的连接池，避免每次请求新建 TCP 连接的三次握手开销</li>
+</ul>
+<p><strong>（3）零拷贝与 ByteBuf 池化</strong></p>
+<ul>
+<li>使用 Netty 的 <code>ByteBuf</code> 代替 JDK <code>ByteBuffer</code></li>
+<li>启用 <code>PooledByteBufAllocator</code>，复用缓冲区内存</li>
+<li>合理设置 <code>SO_BACKLOG</code>、<code>TCP_NODELAY</code>、<code>SO_KEEPALIVE</code></li>
+</ul>
+<p><strong>（4）请求/响应全异步</strong></p>
+<p>网关接收到请求后，把请求转发给 upstream 时不阻塞 EventLoop。upstream 响应通过 callback / Future 机制写回客户端。整个过程中 EventLoop 线程不被 IO 阻塞。</p>
+<p><strong>（5）JVM 与 OS 调优</strong></p>
+<ul>
+<li>增大文件描述符限制（<code>ulimit -n</code>）</li>
+<li>调整 TCP 参数：<code>net.ipv4.tcp_tw_reuse</code>、<code>tcp_fin_timeout</code> 等</li>
+<li>GC 调优：低延迟场景用 G1 或 ZGC</li>
+<li>堆外内存（Direct Memory）合理配置，避免 OOM</li>
+</ul>
+<h3>3. 性能数据拆解</h3>
+<p>7000W 日调用 ≈ 810 QPS 平均。若按 10% 峰值时间集中 80% 流量估算，峰值可能达到 6000+ QPS。单机 7K 并发连接数说明网关能同时保持大量长连接，意味着：连接保持成本低、单次请求处理延迟低、内存占用可控。</p>
+<h2>加分项</h2>
+<ul>
+<li><strong>Epoll vs NIO 选型</strong>：Linux 生产环境使用 <code>EpollEventLoopGroup</code>，基于 Linux epoll，支持 <code>SO_REUSEPORT</code> 实现内核级多进程负载均衡。</li>
+<li><strong>连接池自研</strong>：基于 Netty <code>FixedChannelPool</code> 或自研带健康检查、空闲回收、按 upstream 实例维度管理的连接池。</li>
+<li><strong>路由热更新</strong>：路由规则存在配置中心（如 Nacos），变更后动态刷新网关内存中的路由表。</li>
+<li><strong>多级缓存</strong>：Local Cache（Caffeine）+ Redis 二级缓存，命中缓存的请求直接返回，不转发到 upstream。</li>
+<li><strong>全链路可观测</strong>：每个请求有唯一 trace_id，记录入口延迟、路由耗时、upstream 调用耗时、响应码、错误类型。</li>
+<li><strong>HTTP/2 或 gRPC 支持</strong>：同一个 TCP 连接上并发传输多个请求响应，提升连接利用效率。</li>
+</ul>
+<h2>架构图</h2>
+<pre>
+┌─────────────────────────────────────────────────────────────┐
+│                         客户端                               │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                      Netty Gateway                           │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │ BossGroup (1 thread)                                │    │
+│  │ 负责 accept 新连接                                   │    │
+│  └─────────────────────────────────────────────────────┘    │
+│                              │                               │
+│                              ▼                               │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │ WorkerGroup (N threads)                             │    │
+│  │ 负责 IO 读写 + ChannelPipeline 执行                  │    │
+│  └─────────────────────────────────────────────────────┘    │
+│                              │                               │
+│                              ▼                               │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │ ChannelPipeline                                     │    │
+│  │ Decode → Auth → RateLimit → Route → LoadBalance    │    │
+│  │ → Timeout → CircuitBreaker → Encode                │    │
+│  └─────────────────────────────────────────────────────┘    │
+│                              │                               │
+│                              ▼                               │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │ Upstream Connection Pool                            │    │
+│  │ 后端 A: [conn1][conn2][conn3]                        │    │
+│  │ 后端 B: [conn1][conn2]                               │    │
+│  └─────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                      后端微服务集群                          │
+└─────────────────────────────────────────────────────────────┘
+</pre>`,
+  "followups": [
+    {
+      "q": "为什么选择Netty而不是Zuul？",
+      "answer": `<p>Zuul 1.x 基于 Servlet 容器，采用阻塞 IO，每个连接占用一个线程。当并发连接数达到几千甚至上万时，线程上下文切换和内存开销会急剧上升。</p>
+<p>Netty 是异步非阻塞事件驱动框架，一个 EventLoop 线程可以处理成千上万个连接。对于 7K 并发、70M 日调用的场景，Netty 能用更少的线程支撑更高的连接数，延迟更低、吞吐量更高。</p>
+<table>
+<tr><th>维度</th><th>Zuul 1.x</th><th>Netty</th></tr>
+<tr><td>IO 模型</td><td>阻塞 IO</td><td>异步非阻塞 IO</td></tr>
+<tr><td>线程模型</td><td>一连接一线程</td><td>少量 EventLoop 处理多连接</td></tr>
+<tr><td>延迟</td><td>高并发下延迟抖动大</td><td>高并发下延迟稳定</td></tr>
+<tr><td>可控性</td><td>受限于 Servlet 容器</td><td>Pipeline Handler 可完全自定义</td></tr>
+</table>
+<p>Zuul 2 也支持异步了，但 Netty 的 ChannelPipeline 机制让我们可以把认证、限流、路由、熔断都做成可插拔的 Handler，扩展性更好。</p>`
+    },
+    {
+      "q": "如何处理连接池管理？",
+      "answer": `<p>连接池分两层管理。客户端到网关这层，主要靠 HTTP Keep-Alive 复用连接；网关到后端这层，为每个 upstream 实例维护一个连接池。</p>
+<p>关键参数：</p>
+<ul>
+<li><code>maxConnectionsPerHost</code>：每个 upstream 实例最大连接数</li>
+<li><code>maxPendingAcquires</code>：等待获取连接的最大请求数</li>
+<li><code>acquireTimeout</code>：获取连接超时时间</li>
+<li><code>idleTimeout</code>：连接空闲多久后关闭</li>
+<li><code>healthCheck</code>：定时检测连接是否可用</li>
+</ul>
+<p>实现方式可以基于 Netty 的 <code>FixedChannelPool</code>，也可以自研。自研连接池核心逻辑：请求来时从池里借 Channel，用完归还；没有可用连接且未达上限则新建；达到上限则入等待队列或快速失败。</p>
+<p>还要处理连接老化。TCP 长连接可能因网络抖动、upstream 重启变成死连接。需要定时发送 TCP keep-alive 或应用层心跳检测，失效连接及时清理。</p>`
+    },
+    {
+      "q": "网关的熔断降级如何实现？",
+      "answer": `<p>网关在每个 route 维度维护一个熔断器。统计指标包括：错误率、连续失败次数、P99 延迟。当某个 upstream 实例或某个 route 的指标超过阈值，熔断器打开，后续请求不再转发到该目标，而是走降级逻辑。</p>
+<p>降级策略：</p>
+<ul>
+<li>后端超时：返回缓存数据（Cache fallback）</li>
+<li>后端错误：返回默认值或简化版数据</li>
+<li>后端熔断：返回 503 + 友好提示，或路由到备用集群</li>
+<li>非核心接口：直接返回空或静态页面</li>
+</ul>
+<p>状态机：CLOSED（正常转发）→ OPEN（熔断，走降级）→ HALF-OPEN（试探性放行）→ CLOSED / OPEN。</p>
+<p>熔断统计要区分错误类型：4xx 是客户端错误，不应计入后端熔断；5xx 和 timeout 才是后端异常。另外，熔断器要支持手动强制打开/关闭，方便运维应急。</p>`
+    }
+  ]
+};
+
+window.PREPME_ANSWERS["qjdi4rb"] = {
+  "question": "你提到借鉴MyBatis的ORM模型设计网关通信框架，这个设计思路是什么？",
+  "level": "Advanced",
+  "source": "CV: API网关项目",
+  "date": "2026-06-17",
+  "answer": `<h2>最佳答案</h2>
+<p><strong>核心观点</strong>：MyBatis 的核心设计是<strong>"声明式接口 + 映射配置 + 执行引擎"</strong>三层分离。我们把这一思想迁移到网关通信框架：上层是声明式的通信 Mapper 接口，中间是请求/响应映射配置，底层是统一的网络执行引擎。这样业务方只需要定义接口，不用关心具体协议、序列化、连接管理等细节。</p>
+<h3>1. 设计背景</h3>
+<p>网关场景下后端服务协议多样：HTTP/JSON、私有 TCP 二进制协议、gRPC 等。如果每个协议都手写 client，会有大量重复代码：连接管理、参数拼装、响应解析、重试/超时/日志等横切逻辑。</p>
+<p>MyBatis 的启示是：把<strong>"做什么"</strong>（Mapper 接口）和<strong>"怎么做"</strong>（SQL/映射配置）分开。</p>
+<table>
+<tr><th>MyBatis 概念</th><th>网关通信框架映射</th></tr>
+<tr><td>Mapper 接口</td><td>通信接口（GatewayClient / RpcService）</td></tr>
+<tr><td>SQL 语句</td><td>请求模板（request template）</td></tr>
+<tr><td>参数绑定 <code>#{}</code></td><td>参数映射（param → request field）</td></tr>
+<tr><td>结果映射 <code>&lt;resultMap&gt;</code></td><td>响应映射（response → Java object）</td></tr>
+<tr><td>SqlSession Executor</td><td>网络执行引擎（Netty/HTTP client）</td></tr>
+<tr><td>Interceptor 插件</td><td>拦截器链（日志、重试、熔断、鉴权）</td></tr>
+</table>
+<h3>2. 三层架构</h3>
+<pre>
+┌─────────────────────────────────────┐
+│  Layer 1: 声明式接口层               │
+│  interface UserService {            │
+│    @Request(template="getUser")     │
+│    User getUser(@Param("id") Long id); │
+│  }                                  │
+└─────────────────────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────┐
+│  Layer 2: 映射配置层                 │
+│  &lt;request id="getUser" protocol="http" │
+│           method="GET"              │
+│           path="/users/{id}"&gt;       │
+│    &lt;param name="id" source="arg0"/&gt; │
+│    &lt;result type="User"/&gt;            │
+│  &lt;/request&gt;                         │
+└─────────────────────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────┐
+│  Layer 3: 执行引擎层                 │
+│  Executor → Connection Pool →       │
+│  Serializer → Netty/HttpClient      │
+│  Plugin Chain: 日志 → 重试 → 熔断    │
+└─────────────────────────────────────┘
+</pre>
+<h3>3. 核心优势</h3>
+<ul>
+<li><strong>声明式</strong>：业务方只关心接口，不关心底层网络</li>
+<li><strong>可测试</strong>：接口可以 mock，单元测试不依赖真实网络</li>
+<li><strong>可扩展</strong>：新增协议只需新增 protocol handler 和 serializer</li>
+<li><strong>横切逻辑复用</strong>：日志、监控、重试、熔断通过插件链统一实现</li>
+<li><strong>多协议统一</strong>：HTTP、TCP、gRPC 等可以用同一套编程模型</li>
+</ul>
+<h2>加分项</h2>
+<ul>
+<li><strong>Interceptor 机制迁移</strong>：设计 PluginChain，类似 MyBatis 的 Interceptor，每个插件可以拦截 prepare、execute、resultHandler 三个阶段。日志、metrics、重试、熔断、鉴权都是插件，按需装配。</li>
+<li><strong>Type-Safe 泛化调用</strong>：上层是声明式接口，底层是统一泛化调用。框架根据方法签名和模板配置把 Java 对象转成协议字段；返回时用反射或字节码生成把响应数据回填到 POJO。</li>
+<li><strong>模板支持表达式引擎</strong>：路径、参数、头信息支持 OGNL / SpEL 表达式，可以从方法参数、上下文、甚至上一个插件写入的 ThreadLocal 里取值。</li>
+<li><strong>借鉴 MyBatis 缓存设计</strong>：对于幂等且读多写少的接口，映射配置层加 <code>cache</code> 标签，支持本地缓存（Caffeine）和二级缓存（Redis）。</li>
+<li><strong>代码生成器</strong>：根据后端服务的 OpenAPI / Proto 定义，自动生成 Mapper 接口和映射配置。</li>
+</ul>
+<h2>架构图</h2>
+<pre>
+业务代码
+  │
+  ▼
+userService.getUser(123)
+  │
+  ▼
+┌─────────────────┐
+│  JDK Dynamic    │
+│  Proxy          │
+│  MapperProxy    │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ 解析 @Request     │
+│ 获取 templateId   │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ ParameterHandler │
+│ arg0=123 → path │
+│ /users/{id}     │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│   PluginChain   │
+│ Log → Retry →   │
+│ CircuitBreaker  │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│  Serializer     │
+│ User Object →   │
+│ JSON bytes      │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ ProtocolHandler │
+│ HTTP / TCP /    │
+│ gRPC send       │
+└────────┬────────┘
+         │
+         ▼
+    后端服务
+         │
+         ▼
+┌─────────────────┐
+│ ResponseHandler │
+│ JSON → User POJO│
+└─────────────────┘
+         │
+         ▼
+      返回结果
+</pre>`,
+  "followups": [
+    {
+      "q": "泛化调用的实现原理？",
+      "answer": `<p>泛化调用基于 <strong>JDK Dynamic Proxy</strong> 或 <strong>CGLIB</strong>。调用 Mapper 接口方法时，代理对象拦截到 <code>MethodInvocation</code>，然后从方法上拿到 <code>@Request</code> 注解和模板 ID，根据模板配置把方法参数绑定到请求字段，最后交给统一的 Executor 执行。</p>
+<p>具体流程：</p>
+<pre>
+调用 userService.getUser(123)
+        │
+        ▼
+  MapperProxy.invoke()
+        │
+        ▼
+  解析方法签名 + @Request
+        │
+        ▼
+  根据 templateId 找到请求模板
+        │
+        ▼
+  ParameterHandler 把 arg[0]=123 映射到 path / query / body
+        │
+        ▼
+  PluginChain 依次执行（日志 → 重试 → 熔断）
+        │
+        ▼
+  Executor 发送网络请求
+        │
+        ▼
+  ResponseHandler 把响应字节流转成 User 对象
+        │
+        ▼
+  返回给调用方
+</pre>
+<p>为了性能，首次调用后会把参数映射器和结果映射器缓存起来，避免每次反射。对于复杂对象，用字节码生成（如 MapStruct / ASM）替代反射 setField。</p>`
+    },
+    {
+      "q": "如何处理协议解析？",
+      "answer": `<p>协议解析拆成两层：<strong>Protocol Handler</strong> 负责传输层（HTTP/TCP/gRPC），<strong>Serializer</strong> 负责序列化层（JSON/Protobuf/私有二进制）。请求模板里配置 <code>protocol="http"</code> 和 <code>serialize="json"</code>，框架自动组合。</p>
+<p>处理流程：</p>
+<pre>
+请求侧：
+Java Object ──▶ ParameterHandler ──▶ Map/POJO ──▶ Serializer ──▶ byte[]
+                                    │
+                                    ▼
+                              Protocol Handler
+                              加 header / length / checksum
+                                    │
+                                    ▼
+                              发送到网络
+
+响应侧：
+byte[] ──▶ Protocol Handler 解包 ──▶ 去掉 header / 校验
+              │
+              ▼
+          Serializer 反序列化
+              │
+              ▼
+          ResultHandler 映射成 Java Object
+</pre>
+<p>对于私有二进制协议，定义 <code>ProtocolDecoder</code> 接口，基于 Netty 的 <code>ByteToMessageDecoder</code> 实现，处理粘包、半包、字节序、checksum 校验。</p>`
+    },
+    {
+      "q": "这个设计有什么局限性？",
+      "answer": `<p>这个设计主要有四个局限性：</p>
+<ul>
+<li><strong>反射和动态代理带来性能开销</strong>：虽然做了缓存和字节码生成优化，但相比手写 client 还是多了一层代理和映射。极端性能场景（如单机 10w+ QPS）可能需要针对热点接口做特殊优化或 bypass。</li>
+<li><strong>调试链路变长</strong>：请求经过接口代理、参数映射、插件链、序列化、网络发送多层，出问题时要结合 trace_id 全链路排查。</li>
+<li><strong>类型擦除和复杂泛型支持有限</strong>：返回类型如果是复杂泛型（如 <code>List&lt;Map&lt;String, User&gt;&gt;</code>），映射配置写起来比较麻烦，有时需要自定义 TypeHandler。</li>
+<li><strong>不适合所有协议</strong>：对于强状态、长连接、流式推送类协议（如 WebSocket、MQTT、视频流），这种请求-响应式的 Mapper 模型不够自然，需要另外设计。</li>
+</ul>
+<p>但回到网关调用后端微服务的场景，大多是短连接请求-响应模式，这个模型非常契合。局限性可以通过插件扩展和局部优化来解决。</p>`
+    }
+  ]
+};
+
+window.PREPME_ANSWERS["qyucn2v"] = {
+  "question": "你设计的抽奖系统使用DDD分层结构，并自研规则引擎，能详细介绍一下吗？",
+  "level": "Core",
+  "source": "CV: 抽奖系统项目",
+  "date": "2026-06-17",
+  "answer": `<h2>最佳答案</h2>
+<p><strong>核心观点</strong>：抽奖系统是一个典型的<strong>高并发 + 强规则驱动</strong>的业务。用 DDD 是为了把"活动规则""奖品规则""用户资格""库存扣减"这些复杂业务语义显式建模；自研规则引擎是为了让运营能灵活配置抽奖策略，而不需要每次改代码发版。</p>
+<h3>1. 为什么用 DDD + 自研规则引擎</h3>
+<p>抽奖业务看似简单，实际复杂：一个活动有多种奖品，每种奖品有不同概率、库存、用户限制；不同用户身份命中不同奖池；奖品发放可能走积分、优惠券、实物、现金红包等不同渠道；大促时几万 QPS 同时抽奖，库存不能超发；运营经常临时改规则。</p>
+<p>如果把所有规则写死在代码里，每次活动变更都要发版。所以用 DDD 把领域模型理清楚，用自研规则引擎把"规则"抽象为可配置、可组合、可热更新的组件。</p>
+<h3>2. DDD 四层架构</h3>
+<pre>
+┌─────────────────────────────────────┐
+│  用户接口层（Interfaces / Controller）│
+│  REST API / RPC / 管理后台            │
+│  负责参数校验、DTO 转换、限流            │
+└─────────────────────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────┐
+│  应用层（Application）                │
+│  DrawAppService                     │
+│  编排领域对象、事务边界、发送领域事件     │
+│  不包含业务规则，只负责流程调度          │
+└─────────────────────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────┐
+│  领域层（Domain）                    │
+│  Entity: LotteryActivity / Prize /  │
+│          UserDrawRecord             │
+│  ValueObject: DrawResult / PrizeId  │
+│  DomainService: DrawDomainService   │
+│  Repository: IActivityRepository    │
+└─────────────────────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────┐
+│  基础设施层（Infrastructure）         │
+│  MyBatis Mapper / Redis / MQ /      │
+│  外部奖品发放接口                     │
+│  规则引擎实现也放在这一层              │
+└─────────────────────────────────────┘
+</pre>
+<table>
+<tr><th>层级</th><th>职责</th><th>典型类</th></tr>
+<tr><td>用户接口层</td><td>接收请求、参数校验、返回包装</td><td>DrawController</td></tr>
+<tr><td>应用层</td><td>编排流程、事务、发布事件</td><td>DrawAppService</td></tr>
+<tr><td>领域层</td><td>核心业务逻辑、状态变更、规则计算</td><td>LotteryActivity, DrawResult, DrawDomainService</td></tr>
+<tr><td>基础设施层</td><td>持久化、缓存、消息、外部调用</td><td>ActivityMapper, RedisTemplate, RuleEngineImpl</td></tr>
+</table>
+<h3>3. 自研规则引擎设计</h3>
+<p>规则引擎核心是<strong>"把抽奖判定流程拆成可配置的过滤器链"</strong>。</p>
+<pre>
+Rule = { name, priority, filters[], action }
+</pre>
+<ul>
+<li><code>filters[]</code>：多个过滤条件，全部命中才执行 action</li>
+<li><code>action</code>：命中后的动作，如"发放一等奖""进入兜底奖池""不中奖"</li>
+</ul>
+<p>常见过滤器：</p>
+<ul>
+<li><strong>TimeFilter</strong>：判断是否在活动时间段</li>
+<li><strong>UserFilter</strong>：判断用户身份、黑名单、白名单</li>
+<li><strong>FrequencyFilter</strong>：判断用户抽奖次数是否超限</li>
+<li><strong>StockFilter</strong>：判断奖品库存是否充足</li>
+<li><strong>ProbabilityFilter</strong>：按概率判断是否中奖</li>
+</ul>
+<h3>4. 库存扣减与数据一致性</h3>
+<ul>
+<li>Redis <code>DECR</code> 原子扣减</li>
+<li>DB 层乐观锁最终兜底</li>
+<li>异步对账补偿</li>
+<li>发放失败回滚 Redis 库存</li>
+</ul>
+<h2>加分项</h2>
+<ul>
+<li><strong>规则引擎预编译</strong>：规则配置在发布时解析成 Filter 对象图并缓存，执行时直接走对象调用链，避免运行时反射。</li>
+<li><strong>规则支持 AND/OR/NOT 组合</strong>：通过 Composite Filter 模式实现复杂条件，如"新用户 OR 首单用户，且不在黑名单"。</li>
+<li><strong>领域事件驱动奖品发放</strong>：抽奖结果生成后发布 <code>PrizeWonEvent</code>，异步调用不同奖品发放服务，抽奖核心链路只负责"算出结果"。</li>
+<li><strong>多级缓存预热</strong>：活动开始前把活动配置、奖品概率、库存预热到 Redis，抽奖时基本不走 DB。</li>
+<li><strong>反作弊与风控集成</strong>：规则引擎预留 AntiCheatFilter 扩展点，同一设备短时间大量请求、IP 聚合度异常直接走空奖逻辑。</li>
+</ul>
+<h2>架构图</h2>
+<pre>
+用户请求
+   │
+   ▼
+加载活动配置 + 用户上下文
+   │
+   ▼
+按 priority 排序规则
+   │
+   ▼
+规则 1: [TimeFilter] → [UserFilter] → [ProbabilityFilter]
+         全部命中 ──▶ 发放一等奖
+         任一失败 ──▶ 进入下一条规则
+   │
+   ▼
+规则 2: [TimeFilter] → [FrequencyFilter] → [ProbabilityFilter]
+         全部命中 ──▶ 发放二等奖
+   │
+   ▼
+    ...
+   │
+   ▼
+兜底规则: 发放"谢谢参与"
+</pre>`,
+  "followups": [
+    {
+      "q": "DDD的四层架构如何划分？",
+      "answer": `<p>采用经典 DDD 四层架构：</p>
+<ul>
+<li><strong>用户接口层（Interfaces）</strong>：对接外部请求，如 REST Controller、RPC Provider、管理后台。只做参数校验、DTO 转换、限流，不含业务逻辑。</li>
+<li><strong>应用层（Application）</strong>：负责编排领域对象完成用例，定义事务边界，发布领域事件。比如 <code>DrawAppService</code> 会调用 <code>LotteryActivity.draw(userId)</code>，然后把结果通过事件发送出去。应用层不实现业务规则。</li>
+<li><strong>领域层（Domain）</strong>：核心。包含实体（Entity）、值对象（Value Object）、领域服务（Domain Service）、仓库接口（Repository Interface）。比如 <code>LotteryActivity</code> 实体负责校验活动状态、<code>DrawResult</code> 值对象封装抽奖结果、<code>DrawDomainService</code> 处理跨聚合的复杂规则。</li>
+<li><strong>基础设施层（Infrastructure）</strong>：包含 MyBatis Mapper、Redis 实现、MQ、外部服务客户端、规则引擎的具体实现。领域层通过 Repository Interface 和基础设施层解耦。</li>
+</ul>
+<p>严格遵循依赖倒置原则：Domain 层不依赖 Infrastructure，Infrastructure 依赖 Domain。这样单元测试时可以直接 mock Repository，只测领域逻辑。</p>`
+    },
+    {
+      "q": "规则引擎的过滤器如何组合？",
+      "answer": `<p>过滤器组合有三种维度：</p>
+<ul>
+<li><strong>同一规则内的 filters 是 AND 关系</strong>：一条规则要生效，必须所有 filter 都返回 true。比如 <code>[TimeFilter, UserFilter, StockFilter, ProbabilityFilter]</code>，只有全部通过才发奖。</li>
+<li><strong>不同规则之间是优先级排序的 OR 关系</strong>：规则按 priority 排序，从高到低匹配。一旦某条规则命中，后续规则不再执行。如果没命中任何规则，走默认兜底。</li>
+<li><strong>复杂条件的 AND/OR/NOT 组合</strong>：通过 CompositeFilter 支持 <code>AndFilter(filters[])</code>、<code>OrFilter(filters[])</code>、<code>NotFilter(filter)</code>。例如"新用户 OR 首单用户，且不在黑名单"。</li>
+</ul>
+<p>还支持 Filter 的"短路"执行。比如 StockFilter 失败后，后面的 ProbabilityFilter 不需要执行，直接进下一条规则。</p>`
+    },
+    {
+      "q": "如何保证秒杀场景下的数据一致性？",
+      "answer": `<p>采用多层防线：</p>
+<p><strong>第一层：Redis 原子扣减</strong></p>
+<p>活动开始前把库存预热到 Redis。抽奖时用 Lua 脚本原子执行判断和扣减：</p>
+<pre>
+local stock = redis.call('GET', KEYS[1])
+if tonumber(stock) > 0 then
+    redis.call('DECR', KEYS[1])
+    return 1
+else
+    return 0
+end
+</pre>
+<p>保证判断和扣减原子性，避免并发超卖。</p>
+<p><strong>第二层：DB 乐观锁兜底</strong></p>
+<pre>
+UPDATE prize_stock SET stock = stock - 1, version = version + 1
+WHERE prize_id = ? AND stock > 0 AND version = ?
+</pre>
+<p><strong>第三层：异步对账补偿</strong></p>
+<p>Redis 和 DB 之间可能存在不一致，用定时任务每分钟对账，差异通过补偿事务处理。</p>
+<p><strong>第四层：幂等性</strong></p>
+<p>用户每次抽奖有唯一 <code>draw_id</code>（由 userId + activityId + 序列号生成）。即使请求重试，也不会重复扣库存、重复发奖。</p>
+<p><strong>加分：库存分段</strong></p>
+<p>超高并发活动把总库存拆成 N 段，每段放到不同 Redis key 上，按用户 ID 哈希取段，分散热点。</p>`
+    }
+  ]
+};
