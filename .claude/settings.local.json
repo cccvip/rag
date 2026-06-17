@@ -5,7 +5,10 @@
       "Bash(ls \"F:/ai/prepme\")",
       "Bash(cat \"F:/ai/prepme/install.sh\")",
       "Bash(bash ./install.sh)",
-      "Bash(cp \"C:/Users/admin/.claude/skills/prepme/assets/index.html\" \"f:/rag/index.html\")"
+      "Bash(cp \"C:/Users/admin/.claude/skills/prepme/assets/index.html\" \"f:/rag/index.html\")",
+      "Bash(git checkout *)",
+      "Bash(rm -f 意图识别_面试QA.md Agent记忆管理_面试QA.md Function_Calling_面试QA.md MCP协议_面试QA.md \"Prompt与Context_Engineering_面试QA.md\" 模型微调_SFT_RLHF_DPO_面试QA.md RAG系统设计_面试QA.md 多租户Agent平台_面试QA.md 三模块协作_面试QA.md)",
+      "Bash(node -e 'const s=process.argv[1];let h=0x811c9dc5>>>0;for\\(let i=0;i<s.length;i++\\){h^=s.charCodeAt\\(i\\);h=Math.imul\\(h,0x01000193\\)>>>0;}console.log\\(\"q\"+h.toString\\(36\\)\\);' \"请解释 ReAct Pattern 的工作原理，以及它与传统 Chain-of-Thought 的区别是什么？\")"
     ]
   }
 }
