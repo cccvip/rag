@@ -1,4 +1,7 @@
 {
+  "env": {
+    "LUCKIN_MCP_TOKEN": "Bearer 6d8360f514224334a7aa5dda32c717809mcpLUCKIN_MCP_AI"
+  },
   "permissions": {
     "allow": [
       "WebFetch(domain:www.techresume.io)",
@@ -10,7 +13,13 @@
       "Bash(rm -f 意图识别_面试QA.md Agent记忆管理_面试QA.md Function_Calling_面试QA.md MCP协议_面试QA.md \"Prompt与Context_Engineering_面试QA.md\" 模型微调_SFT_RLHF_DPO_面试QA.md RAG系统设计_面试QA.md 多租户Agent平台_面试QA.md 三模块协作_面试QA.md)",
       "Bash(node -e 'const s=process.argv[1];let h=0x811c9dc5>>>0;for\\(let i=0;i<s.length;i++\\){h^=s.charCodeAt\\(i\\);h=Math.imul\\(h,0x01000193\\)>>>0;}console.log\\(\"q\"+h.toString\\(36\\)\\);' \"请解释 ReAct Pattern 的工作原理，以及它与传统 Chain-of-Thought 的区别是什么？\")",
       "Skill(prepme)",
-      "Skill(prepme:*)"
+      "Skill(prepme:*)",
+      "Bash(ls -la \"C:/Users/admin/.claude/skills/my-coffee/\")",
+      "Bash(claude mcp *)",
+      "Bash(mkdir -p ~/.my-coffee)",
+      "Bash(echo \"6d8360f514224334a7aa5dda32c717809mcpLUCKIN_MCP_AI\")",
+      "Bash(chmod 600 ~/.my-coffee/LUCKIN_MCP_TOKEN)",
+      "Bash(curl -s https://ipinfo.io/json)"
     ]
   }
 }
