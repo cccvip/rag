@@ -62,27 +62,32 @@
 
 ---
 
-**CoreAgent 平台层 — 可靠调用 LLM 的业务集成层**
+**CoreAgent 平台层 — 统一 Agent 基础设施**
 
-在 Spring AI 框架之上封装 CoreAgent 平台层，解决生产环境中"可靠调用 LLM"的问题。平台层提供 7 个核心模块，其中 4 个通过接口开放给业务实现，3 个为纯平台复用。
+在 Spring AI 框架之上封装 CoreAgent 平台层，作为公司 Agent 应用的统一基础设施，解决生产环境中"可靠调用 LLM"的问题。平台层提供 7 个核心模块，其中 4 个通过接口开放给业务实现，3 个为纯平台复用。
 
-- **ToolRegistry（工具注册中心）**：业务方实现 `CoreTool` 接口注册工具，平台按场景（ops/rag）隔离工具集，运维 Agent 看不到 RAG 工具，反之亦然。工具元数据 `ToolMeta` 承载风险等级、租户可见性、超时配置等平台管控能力。
+- **ToolRegistry（工具注册中心）**：业务方实现 `CoreTool` 接口注册工具，平台按场景（ops/rag/data）隔离工具集，同一 Agent 入口可按意图路由到不同场景工具集。工具元数据 `ToolMeta` 承载风险等级、租户可见性、超时配置等平台管控能力。
 - **PreProcessor（返回值预处理）**：平台提供路由链 `PreProcessorChain`，业务方实现具体预处理逻辑。运维场景：日志聚合去重（5000 行→20 行摘要）、指标趋势提取；RAG 场景：文档截断、引用提取。避免原始数据撑爆 context window。
 - **ContextManager（上下文窗口管理）**：平台提供 Token 计数和溢出裁剪机制，业务方通过 `ContextStrategy` 决定优先级。运维场景：日志指标优先保留；RAG 场景：检索文档优先保留（需要引用溯源）。
 - **GuardRail（安全护栏）**：平台提供检查框架、频率限制、人工确认服务，业务方通过 `RiskRule` 定义风险判定。四级分级：LOW 直接执行、MEDIUM 审计日志、HIGH 人工确认、CRITICAL 不开放给 Agent。
 - **TenantCtrl（租户管控）**：纯平台组件。Token 月度配额 + QPS 令牌桶限流 + 成本追踪，防止租户间资源抢占。
 - **AgentTracer（调用链追踪）**：纯平台组件。记录每步推理的 Thought/Action/Observation，接入 Prometheus + Grafana，成本和延迟可追踪。
 - **AgentExecutor（ReAct 推理引擎）**：纯平台组件。串联所有模块，执行 Thought→Action→Observation 循环。
-- **业务场景接入**：运维自愈（故障诊断→自动修复，夜间人工介入率从 100% 降至 15%，MTTR 从 45 分钟压缩至 8 分钟）、RAG 问答（Agent 化检索生成）、运营数据查询（自然语言查询到访人数/Token用量/数据用量，运营人员无需写SQL）。新场景只需实现 4 个接口即可接入。
-- **Multi-Agent 协同**：复杂任务拆分为 Retriever（检索）、Reranker（精排）、Writer（生成）三个 Agent，串行编排。单 Agent Faithfulness 0.72，三 Agent 协同提升至 0.89，延迟增加 50%（300ms→450ms），准确性收益大于延迟代价。
-- **本地化部署**：基于 Qwen 模型本地部署，数据不出域，满足 TOB 客户安全合规要求。
-- **技术选型**：选择 Spring AI 而非 LangChain，原因：项目主体是 Java 技术栈，Spring AI 与 Spring Boot 天然集成；本地部署场景下 Java 生态的运维工具链更成熟；团队 5 人均为 Java 背景，Python 框架的学习成本不可忽视。
 
----
+**业务场景接入**：基于统一 Agent 入口，按用户意图路由到不同场景工具集：
+- **RAG 问答**：调用安全知识库检索工具，实现 Agent 化检索生成；
+- **运维自愈**：调用故障诊断与修复工具，夜间人工介入率从 100% 降至 15%，MTTR 从 45 分钟压缩至 8 分钟；
+- **运营数据查询**：调用数据查询工具，运营人员通过自然语言查询到访人数、Token 用量、数据用量，无需写 SQL。
 
-**AI 辅助工程效能 — MCP 驱动的规范即代码**
+三类场景共享同一套 ToolRegistry、GuardRail、TenantCtrl 和 AgentTracer，新场景只需实现 4 个接口即可接入。
 
-通过 MCP 协议打通 YAPI 接口规范与 AI 代码生成链路。接口定义在 YAPI 完成后，通过 MCP 暴露为 Resource，AI 编码助手读取规范自动生成 Controller/Service/Request/Response 代码。重复编码工作量减少约 60%，接口规范成为 Single Source of Truth。日常使用 Claude Code 作为主力开发工具，AI 辅助完成代码生成、Review、重构，结合 MCP 协议实现"规范即代码"的研发工作流。
+**多步骤协同**：单个复杂任务在 AgentExecutor 内部拆分为 Retriever（检索）、Reranker（精排）、Writer（生成）三个子步骤，串行编排。单步骤 Faithfulness 0.72，三步协同提升至 0.89，延迟增加 50%（300ms→450ms），准确性收益大于延迟代价。
+
+**本地化部署**：基于 Qwen 模型本地部署，数据不出域，满足 TOB 客户安全合规要求。
+
+**技术选型**：选择 Spring AI 而非 LangChain，原因：项目主体是 Java 技术栈，Spring AI 与 Spring Boot 天然集成；本地部署场景下 Java 生态的运维工具链更成熟；团队 5 人均为 Java 背景，Python 框架的学习成本不可忽视。
+
+**MCP 协议接入层**：在 CoreAgent 平台层之上实现 MCP Server 适配，将平台内注册的工具、资源、提示词通过标准 MCP 协议暴露给外部 LLM 客户端（Claude Desktop / Cursor / 企业自研 Agent）。复用 CoreAgent 的 GuardRail、TenantCtrl、AgentTracer 等治理模块，使外部客户端可安全调用企业安全知识库与运维自愈能力，无需改造既有 CoreTool 实现。
 
 ---
 
