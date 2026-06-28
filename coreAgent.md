@@ -253,9 +253,9 @@ public class MetricPreProcessor implements ResultPreProcessor {
 平台层                              业务层
 ┌─────────────────────────┐     ┌──────────────────────────┐
 │ ContextManager          │     │ ContextStrategy 接口      │
-│ - Token 计数             │     │ - budgetRatio() 预算比例  │
-│ - 预算分配框架            │←──  │ - priority() 内容优先级   │
-│ - 溢出裁剪机制           │     │ - trimPolicy() 裁剪策略   │
+│ - Token 计数             │     │ - priority() 内容优先级   │
+│ - 溢出裁剪机制            │←──  │ - trim() 默认裁剪逻辑     │
+│                         │     │                          │
 │                         │     │                          │
 │ 提供默认实现 DefaultCtx  │     │ 运维: 日志>Thought>文档    │
 │ 业务可覆盖               │     │ RAG:  文档>Thought>日志    │
@@ -269,19 +269,25 @@ public class MetricPreProcessor implements ResultPreProcessor {
  * 内容优先级策略 — 业务方实现此接口决定裁剪顺序
  */
 public interface ContextStrategy {
-    /** Token 预算分配比例 [system, toolResults, thoughts] */
-    default BudgetRatio budgetRatio() {
-        return new BudgetRatio(0.2, 0.5, 0.3);
-    }
-
     /** 内容优先级：数字越小越优先保留 */
     int priority(MessageBlock block);
 
     /** 裁剪策略：超预算时按优先级从低到高裁剪 */
     default List<MessageBlock> trim(List<MessageBlock> blocks, int overBudget) {
-        return blocks.stream()
+        List<MessageBlock> sorted = blocks.stream()
             .sorted(Comparator.comparingInt(this::priority).reversed())
-            .collect(Collectors.toList());
+            .toList();
+
+        int removed = 0;
+        List<MessageBlock> result = new ArrayList<>();
+        for (MessageBlock block : sorted) {
+            if (removed < overBudget) {
+                removed += block.getTokenCount();
+                continue;
+            }
+            result.add(block);
+        }
+        return result;
     }
 }
 
