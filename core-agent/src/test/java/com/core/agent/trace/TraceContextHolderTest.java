@@ -1,5 +1,7 @@
 package com.core.agent.trace;
 
+import com.core.agent.trace.domain.TraceContext;
+import com.core.agent.trace.domain.TraceContextHolder;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.MDC;

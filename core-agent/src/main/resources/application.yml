@@ -1,0 +1,81 @@
+agent:
+  demo:
+    enabled: false
+
+spring:
+  ai:
+    openai:
+      api-key: ${DEEPSEEK_API_KEY}
+      base-url: https://api.deepseek.com
+      chat:
+        options:
+          model: deepseek-v4-pro
+          temperature: 0.7
+
+mcp:
+  gateway:
+    timeout-ms: 30000
+    services:
+      ops-service: http://localhost:8081
+      rag-service: http://localhost:8082
+      analytics-service: http://localhost:8083
+    tools:
+      # 运维场景
+      - name: log_query
+        description: "查询日志"
+        service: ops-service
+        path: /api/log/query
+        method: POST
+        risk-level: LOW
+        scene: ops
+      - name: metric_query
+        description: "查询指标"
+        service: ops-service
+        path: /api/metric/query
+        method: POST
+        risk-level: LOW
+        scene: ops
+      - name: service_restart
+        description: "重启服务"
+        service: ops-service
+        path: /api/service/restart
+        method: POST
+        risk-level: HIGH
+        scene: ops
+      # RAG 场景
+      - name: dense_retrieve
+        description: "向量检索"
+        service: rag-service
+        path: /api/retrieve/dense
+        method: POST
+        risk-level: LOW
+        scene: rag
+      - name: sparse_retrieve
+        description: "BM25 检索"
+        service: rag-service
+        path: /api/retrieve/sparse
+        method: POST
+        risk-level: LOW
+        scene: rag
+      - name: rerank
+        description: "精排"
+        service: rag-service
+        path: /api/rerank
+        method: POST
+        risk-level: LOW
+        scene: rag
+      # 运营场景
+      - name: visitor_query
+        description: "到访人数查询"
+        service: analytics-service
+        path: /api/visitor/query
+        method: POST
+        risk-level: LOW
+        scene: analytics
+      - name: token_usage_query
+        description: "Token 用量查询"
+        service: analytics-service
+        path: /api/token/usage
+        method: POST
+        risk-level: LOW
+        scene: analytics

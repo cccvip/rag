@@ -1,5 +1,9 @@
 package com.core.agent.context;
 
+import com.core.agent.context.application.ContextManager;
+import com.core.agent.context.domain.MessageBlock;
+import com.core.agent.context.infrastructure.DefaultContextStrategy;
+import com.core.agent.context.infrastructure.RagContextStrategy;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.tokenizer.JTokkitTokenCountEstimator;
 import org.springframework.ai.tokenizer.TokenCountEstimator;

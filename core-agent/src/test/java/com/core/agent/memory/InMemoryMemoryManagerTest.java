@@ -1,5 +1,10 @@
 package com.core.agent.memory;
 
+import com.core.agent.memory.application.MemoryManager;
+import com.core.agent.memory.domain.MemoryMessage;
+import com.core.agent.memory.domain.MemoryStore;
+import com.core.agent.memory.infrastructure.InMemoryMemoryManager;
+import com.core.agent.memory.infrastructure.InMemoryMemoryStore;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.tokenizer.JTokkitTokenCountEstimator;
 import org.springframework.ai.tokenizer.TokenCountEstimator;

@@ -1,11 +1,17 @@
 package com.core.agent;
 
-import com.core.agent.context.ContextManager;
-import com.core.agent.context.DefaultContextStrategy;
-import com.core.agent.memory.InMemoryMemoryManager;
-import com.core.agent.memory.InMemoryMemoryStore;
-import com.core.agent.memory.MemoryManager;
-import com.core.agent.memory.MemoryMessage;
+import com.core.agent.agent.domain.Agent;
+import com.core.agent.bootstrap.MetricsTracker;
+import com.core.agent.context.application.ContextManager;
+import com.core.agent.context.infrastructure.DefaultContextStrategy;
+import com.core.agent.guardrail.domain.GuardRail;
+import com.core.agent.memory.application.MemoryManager;
+import com.core.agent.memory.domain.MemoryMessage;
+import com.core.agent.memory.infrastructure.InMemoryMemoryManager;
+import com.core.agent.memory.infrastructure.InMemoryMemoryStore;
+import com.core.agent.shared.model.RiskLevel;
+import com.core.agent.tool.domain.Tool;
+import com.core.agent.tool.domain.ToolRegistry;
 import org.junit.jupiter.api.Test;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.metadata.ChatResponseMetadata;
