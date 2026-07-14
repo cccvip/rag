@@ -39,7 +39,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <ol>
  *     <li>规划节点生成 JSON 步骤计划</li>
  *     <li>执行节点按顺序调用工具</li>
- *     <li>评估节点判断结果充分</li>
+ *     <li>重新规划决策门根据执行结果路由</li>
  *     <li>结束节点生成最终答案</li>
  * </ol>
  */
@@ -58,12 +58,7 @@ class PlanAndExecuteStrategyTest {
     /**
      * 测试标准 Plan-and-Execute 流程。
      *
-     * <p>LLM 三次调用分别返回：</p>
-     * <ol>
-     *     <li>包含一个 retriever 调用的 JSON 计划</li>
-     *     <li>评估结果：sufficient</li>
-     *     <li>最终答案</li>
-     * </ol>
+     * <p>工具返回非空结果，决策门判断为"部分或全部成功"，直接路由到结束节点。</p>
      */
     @Test
     void shouldExecutePlanAndReturnFinalAnswer() {
@@ -93,14 +88,13 @@ class PlanAndExecuteStrategyTest {
             }
         });
 
-        // Mock ChatModel：按顺序返回计划、评估、最终答案
+        // Mock ChatModel：只需要 2 次调用（规划 + 最终答案）
         ChatModel mockModel = new ChatModel() {
             private final AtomicInteger callCount = new AtomicInteger(0);
 
             @Override
             public ChatResponse call(Prompt prompt) {
                 int count = callCount.incrementAndGet();
-                String promptText = prompt.getContents();
                 String content;
 
                 if (count == 1) {
@@ -111,11 +105,8 @@ class PlanAndExecuteStrategyTest {
                             "\"toolInput\": \"fire escape route\"," +
                             "\"purpose\": \"retrieve documents about fire escape routes\"" +
                             "}]";
-                } else if (promptText.contains("sufficient") || promptText.contains("replan")) {
-                    // 第二次调用：评估节点
-                    content = "sufficient";
                 } else {
-                    // 第三次调用：结束节点生成最终答案
+                    // 第二次调用：结束节点生成最终答案
                     content = "The fire escape route is on the north side.";
                 }
                 return buildResponse(content);
@@ -132,12 +123,14 @@ class PlanAndExecuteStrategyTest {
             }
         };
 
+        MetricsTracker metrics = new MetricsTracker();
+
         // 构建 NodeContext
         NodeContext context = NodeContext.builder()
                 .chatModel(mockModel)
                 .toolRegistry(registry)
                 .guardRail(new GuardRail())
-                .metricsTracker(new MetricsTracker())
+                .metricsTracker(metrics)
                 .memoryManager(memoryManager())
                 .contextManager(contextManager())
                 .maxIterations(5)
@@ -172,12 +165,13 @@ class PlanAndExecuteStrategyTest {
     /**
      * 测试重新规划流程。
      *
-     * <p>第一次评估认为结果不充分，策略应回到规划节点重新生成计划，
-     * 第二次评估通过后生成最终答案。</p>
+     * <p>第一次执行工具返回空结果，决策门判断为"计划假设错误"，触发 replan；
+     * 第二次执行返回非空结果，直接结束。</p>
      */
     @Test
-    void shouldReplanWhenFirstEvaluationIsInsufficient() {
+    void shouldReplanWhenAllResultsAreEmpty() {
         ToolRegistry registry = new ToolRegistry();
+        AtomicInteger toolCallCount = new AtomicInteger(0);
         registry.register(new Tool() {
             @Override
             public String name() {
@@ -196,7 +190,9 @@ class PlanAndExecuteStrategyTest {
 
             @Override
             public String execute(String input) {
-                return "partial result for: " + input;
+                int count = toolCallCount.incrementAndGet();
+                // 第一次返回空，触发 replan；第二次返回非空结果
+                return count == 1 ? "" : "relevant result after replan";
             }
         });
 
@@ -208,19 +204,12 @@ class PlanAndExecuteStrategyTest {
                 int count = callCount.incrementAndGet();
                 String content;
 
-                // 严格按调用次数返回，避免 query 里的关键词干扰条件判断
                 if (count == 1) {
                     // 第一次规划
                     content = "[{\"stepNumber\": 1, \"toolName\": \"retriever\", \"toolInput\": \"first query\", \"purpose\": \"first try\"}]";
                 } else if (count == 2) {
-                    // 第一次评估：不充分
-                    content = "replan";
-                } else if (count == 3) {
-                    // 第二次规划（重新规划时带上之前的 observation）
+                    // 重新规划
                     content = "[{\"stepNumber\": 1, \"toolName\": \"retriever\", \"toolInput\": \"second query\", \"purpose\": \"second try\"}]";
-                } else if (count == 4) {
-                    // 第二次评估：充分
-                    content = "sufficient";
                 } else {
                     // 最终答案
                     content = "Answer after replanning.";
@@ -239,11 +228,13 @@ class PlanAndExecuteStrategyTest {
             }
         };
 
+        MetricsTracker metrics = new MetricsTracker();
+
         NodeContext context = NodeContext.builder()
                 .chatModel(mockModel)
                 .toolRegistry(registry)
                 .guardRail(new GuardRail())
-                .metricsTracker(new MetricsTracker())
+                .metricsTracker(metrics)
                 .memoryManager(memoryManager())
                 .contextManager(contextManager())
                 .maxIterations(5)
@@ -263,13 +254,114 @@ class PlanAndExecuteStrategyTest {
         PlanAndExecuteStrategy strategy = new PlanAndExecuteStrategy("rag");
         AgentState initialState = AgentState.initial("trace-replan-test", "tenant", "user", "rag")
                 .withVariable("sessionId", "session-replan-test")
-                .withVariable("query", "Complex question requiring replan")
+                .withVariable("query", "Find relevant documents")
                 .withCurrentNode("planNode");
 
         GraphResult result = strategy.compile().execute(initialState, context);
 
         assertTrue(result.isCompleted(), "Graph should complete after replan");
         assertEquals("Answer after replanning.", result.getFinalAnswer());
+        assertEquals(2, toolCallCount.get(), "Tool should be called twice (original + replan)");
+    }
+
+    /**
+     * 测试部分步骤成功时不触发重新规划。
+     *
+     * <p>只要有一个步骤返回了非空结果，就应该直接用已有结果回答，
+     * 而不是为了失败的步骤重新规划。</p>
+     */
+    @Test
+    void shouldNotReplanWhenPartialStepsSucceed() {
+        ToolRegistry registry = new ToolRegistry();
+        registry.register(new Tool() {
+            @Override
+            public String name() {
+                return "retriever";
+            }
+
+            @Override
+            public String description() {
+                return "retrieve relevant documents";
+            }
+
+            @Override
+            public RiskLevel riskLevel() {
+                return RiskLevel.LOW;
+            }
+
+            @Override
+            public String execute(String input) {
+                // 模拟部分成功：只有特定输入能查到结果
+                return input.contains("good") ? "good result" : "";
+            }
+        });
+
+        ChatModel mockModel = new ChatModel() {
+            private final AtomicInteger callCount = new AtomicInteger(0);
+
+            @Override
+            public ChatResponse call(Prompt prompt) {
+                int count = callCount.incrementAndGet();
+                String content;
+
+                if (count == 1) {
+                    // 规划两个步骤：一个会成功，一个会失败
+                    content = "[" +
+                            "{\"stepNumber\": 1, \"toolName\": \"retriever\", \"toolInput\": \"good query\", \"purpose\": \"should succeed\"}," +
+                            "{\"stepNumber\": 2, \"toolName\": \"retriever\", \"toolInput\": \"bad query\", \"purpose\": \"will return empty\"}" +
+                            "]";
+                } else {
+                    content = "Final answer based on partial results.";
+                }
+                return buildResponse(content);
+            }
+
+            @Override
+            public Flux<ChatResponse> stream(Prompt prompt) {
+                return Flux.empty();
+            }
+
+            @Override
+            public ChatOptions getDefaultOptions() {
+                return null;
+            }
+        };
+
+        MetricsTracker metrics = new MetricsTracker();
+
+        NodeContext context = NodeContext.builder()
+                .chatModel(mockModel)
+                .toolRegistry(registry)
+                .guardRail(new GuardRail())
+                .metricsTracker(metrics)
+                .memoryManager(memoryManager())
+                .contextManager(contextManager())
+                .maxIterations(5)
+                .llmTimeoutSeconds(60)
+                .toolTimeoutSeconds(30)
+                .maxRetries(2)
+                .enableReflection(false)
+                .maxMemoryTokens(2000)
+                .traceContext(NodeContext.Trace.builder()
+                        .traceId("trace-partial-test")
+                        .tenantId("tenant")
+                        .userId("user")
+                        .scene("rag")
+                        .build())
+                .build();
+
+        PlanAndExecuteStrategy strategy = new PlanAndExecuteStrategy("rag");
+        AgentState initialState = AgentState.initial("trace-partial-test", "tenant", "user", "rag")
+                .withVariable("sessionId", "session-partial-test")
+                .withVariable("query", "Mixed result query")
+                .withCurrentNode("planNode");
+
+        GraphResult result = strategy.compile().execute(initialState, context);
+
+        assertTrue(result.isCompleted(), "Graph should complete without replan");
+        assertEquals("Final answer based on partial results.", result.getFinalAnswer());
+        // 验证只调用了 2 次 LLM：规划 + 最终答案，没有额外的 replan 规划
+        assertEquals(2, (int) result.getFinalState().getVariable("llmCallCount"));
     }
 
     private ChatResponse buildResponse(String content) {

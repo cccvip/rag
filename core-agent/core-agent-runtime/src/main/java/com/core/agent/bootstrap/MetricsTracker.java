@@ -34,6 +34,8 @@ public class MetricsTracker {
     private int repeatedActionCount = 0;
     private int highRiskAttemptCount = 0;
     private int highRiskBlockedCount = 0;
+    private int planCount = 0;
+    private int replanCount = 0;
     private long totalLatencyMs = 0;
     private long llmTotalTokens = 0;
     private Double citationAccuracy = null;
@@ -74,6 +76,20 @@ public class MetricsTracker {
      */
     public void recordHighRiskAttempt() {
         highRiskAttemptCount++;
+    }
+
+    /**
+     * 记录一次规划调用。
+     */
+    public void recordPlan() {
+        planCount++;
+    }
+
+    /**
+     * 记录一次重新规划。
+     */
+    public void recordReplan() {
+        replanCount++;
     }
 
     /**
@@ -129,6 +145,8 @@ public class MetricsTracker {
         report.append("Task Success Rate     : ").append(taskSuccess ? "100%" : "0%").append("\n");
         report.append("Total Steps           : ").append(stepCount).append("\n");
         report.append("Avg Steps             : ").append(stepCount).append("\n");
+        report.append("Plan Count            : ").append(planCount).append("\n");
+        report.append("Replan Count          : ").append(replanCount).append("\n");
         report.append("Tool Call Success Rate: ")
                 .append(formatRate(toolCallSuccessCount, toolCallCount)).append("\n");
         report.append("Repeated Actions      : ").append(repeatedActionCount).append("\n");

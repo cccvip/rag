@@ -6,8 +6,8 @@ import com.core.agent.agent.graph.domain.AgentNode;
 import com.core.agent.agent.graph.domain.AgentState;
 import com.core.agent.agent.graph.domain.NodeContext;
 import com.core.agent.agent.strategy.domain.ExecutionStrategy;
+import com.core.agent.bootstrap.MetricsTracker;
 import com.core.agent.mcp.infrastructure.McpGateway;
-import com.core.agent.shared.model.RiskLevel;
 import com.core.agent.tool.domain.Tool;
 import com.core.agent.tool.domain.ToolCallResult;
 import com.core.agent.tool.domain.ToolRegistry;
@@ -15,7 +15,6 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
@@ -31,13 +30,23 @@ import java.util.stream.Collectors;
  * Plan-and-Execute 执行策略。
  *
  * <p>与 ReAct "边想边做" 不同，Plan-and-Execute 会先让 LLM 生成一份完整的步骤计划，
- * 再按顺序执行每个步骤，最后评估结果是否充分。如果不够充分，则带着已有的观察结果重新规划。</p>
+ * 再按顺序执行每个步骤，最后根据执行结果决定结束或重新规划。</p>
+ *
+ * <p>本实现遵循 Ranjan Kumar《Why Your AI Agent Finishes Tasks But Fails the Goal》
+ * 一文中提出的设计原则：</p>
+ * <ul>
+ *     <li><b>重新规划是最后手段</b>：只有计划假设被证明错误时才 replan，
+ *         单步失败用局部结果兜底，不把 replan 当错误恢复</li>
+ *     <li><b>保留已完成任务</b>：replan 时只重写未执行步骤，已完成的 observation 保留</li>
+ *     <li><b>预算硬上限</b>：replan 次数、LLM 调用次数、step 数都有上限</li>
+ *     <li><b>在自然里程碑判断</b>：不在每个步骤后判断，而是在整轮执行完成后统一决策</li>
+ * </ul>
  *
  * <p>这种状态图形态更适合：</p>
  * <ul>
  *     <li>多跳检索：RAG 场景下需要先后查询多个不同来源</li>
  *     <li>确定性流程：步骤之间依赖关系清晰，不希望 LLM 每一步都重新决策</li>
- *     <li>成本敏感场景：减少 LLM 调用次数，一次规划 + 一次评估</li>
+ *     <li>成本敏感场景：减少 LLM 调用次数</li>
  * </ul>
  */
 public class PlanAndExecuteStrategy implements ExecutionStrategy<NodeContext> {
@@ -72,9 +81,35 @@ public class PlanAndExecuteStrategy implements ExecutionStrategy<NodeContext> {
     private static final String KEY_QUERY = "query";
 
     /**
+     * 状态变量 key：LLM 调用次数。
+     *
+     * <p>用于预算控制，避免单次请求无限调用 LLM。</p>
+     */
+    private static final String KEY_LLM_CALL_COUNT = "llmCallCount";
+
+    /**
+     * 状态变量 key：执行结果摘要。
+     */
+    private static final String KEY_EXECUTION_SUMMARY = "executionSummary";
+
+    /**
      * 最大允许重新规划次数。
+     *
+     * <p>参照生产实践中的硬上限原则，防止目标漂移和无限循环。</p>
      */
     private static final int MAX_REPLAN = 2;
+
+    /**
+     * 单次请求最大 LLM 调用次数。
+     *
+     * <p>Plan（1）+ End（1）+ 每轮 replan 的 Plan（1）= 最多 3 次。</p>
+     */
+    private static final int MAX_LLM_CALLS = 5;
+
+    /**
+     * 状态图最大执行步数。
+     */
+    private static final int MAX_GRAPH_STEPS = 20;
 
     /**
      * LLM 调用超时时间（秒）。
@@ -97,22 +132,14 @@ public class PlanAndExecuteStrategy implements ExecutionStrategy<NodeContext> {
      *
      * <p>图结构：</p>
      * <pre>
-     * START -> planNode -> executeNode -> evaluateNode
-     *                          ^              |
-     *                          |              v
+     * START -> planNode -> executeNode -> replanGateNode
+     *                          ^                  |
+     *                          |                  v
      *                          └──── 需要重新规划 ──┘
-     *                                         |
-     *                                         v
-     *                                      endNode
+     *                                             |
+     *                                             v
+     *                                          endNode
      * </pre>
-     *
-     * <p>每个节点只负责一件明确的事，符合状态图设计哲学：</p>
-     * <ul>
-     *     <li>planNode：生成步骤计划</li>
-     *     <li>executeNode：按顺序执行所有步骤</li>
-     *     <li>evaluateNode：判断结果是否充分，决定结束或重新规划</li>
-     *     <li>endNode：生成最终答案</li>
-     * </ul>
      */
     @Override
     public AgentGraph<NodeContext> compile() {
@@ -120,20 +147,20 @@ public class PlanAndExecuteStrategy implements ExecutionStrategy<NodeContext> {
                 .startNode("planNode")
                 .addNode("planNode", new PlanNode())
                 .addNode("executeNode", new ExecuteNode())
-                .addNode("evaluateNode", new EvaluateNode())
+                .addNode("replanGateNode", new ReplanGateNode())
                 .addNode("endNode", new EndNode())
                 // 规划完成后进入执行节点
                 .addEdge("planNode", "executeNode")
-                // 执行完成后进入评估节点
-                .addEdge("executeNode", "evaluateNode")
-                // 评估认为需要重新规划时，回到 planNode
-                .addConditionalEdge("evaluateNode", "planNode",
+                // 执行完成后进入重新规划决策门
+                .addEdge("executeNode", "replanGateNode")
+                // 决策门认为需要重新规划时，回到 planNode
+                .addConditionalEdge("replanGateNode", "planNode",
                         state -> Boolean.TRUE.equals(state.getVariable("needReplan")))
-                // 评估认为可以结束时，进入 endNode
-                .addConditionalEdge("evaluateNode", "endNode",
+                // 决策门认为可以结束时，进入 endNode
+                .addConditionalEdge("replanGateNode", "endNode",
                         state -> !Boolean.TRUE.equals(state.getVariable("needReplan")))
                 .endNode("endNode")
-                .maxSteps(20)
+                .maxSteps(MAX_GRAPH_STEPS)
                 .build();
     }
 
@@ -154,11 +181,19 @@ public class PlanAndExecuteStrategy implements ExecutionStrategy<NodeContext> {
         public AgentState invoke(AgentState state, NodeContext ctx) {
             String query = state.getVariable(KEY_QUERY);
             List<PlanStep> previousPlan = state.getVariable(KEY_PLAN);
-            int replanCount = state.getVariable(KEY_REPLAN_COUNT) == null
-                    ? 0 : (int) state.getVariable(KEY_REPLAN_COUNT);
+            int replanCount = getReplanCount(state);
+            int llmCallCount = getLlmCallCount(state);
 
             if (query == null) {
                 return state.error("Missing query in state");
+            }
+
+            // 预算检查：LLM 调用次数上限
+            if (llmCallCount >= MAX_LLM_CALLS) {
+                log.warn("LLM call budget exhausted, forcing completion");
+                return state.withVariable("needReplan", false)
+                        .withVariable("budgetExceeded", true)
+                        .withMessage(AgentMessage.system("LLM call budget exhausted."));
             }
 
             log.debug("Planning for query: {}, replanCount: {}", query, replanCount);
@@ -170,11 +205,22 @@ public class PlanAndExecuteStrategy implements ExecutionStrategy<NodeContext> {
                 String llmOutput = callLlm(ctx, planPrompt);
                 List<PlanStep> plan = parsePlan(llmOutput);
 
+                // 记录指标
+                MetricsTracker metrics = ctx.getMetricsTracker();
+                if (metrics != null) {
+                    if (replanCount == 0) {
+                        metrics.recordPlan();
+                    } else {
+                        metrics.recordReplan();
+                    }
+                }
+
                 if (plan.isEmpty()) {
-                    // LLM 没有生成任何步骤，直接让评估节点去生成最终答案
+                    // LLM 没有生成任何步骤，直接让结束节点基于已有信息回答
                     return state.withVariable(KEY_PLAN, new ArrayList<PlanStep>())
                             .withVariable(KEY_CURRENT_STEP, 0)
                             .withVariable(KEY_REPLAN_COUNT, replanCount + 1)
+                            .withVariable(KEY_LLM_CALL_COUNT, llmCallCount + 1)
                             .withVariable("needReplan", false)
                             .withMessage(AgentMessage.thought("No plan steps generated, will answer directly."));
                 }
@@ -182,6 +228,7 @@ public class PlanAndExecuteStrategy implements ExecutionStrategy<NodeContext> {
                 return state.withVariable(KEY_PLAN, plan)
                         .withVariable(KEY_CURRENT_STEP, 0)
                         .withVariable(KEY_REPLAN_COUNT, replanCount + 1)
+                        .withVariable(KEY_LLM_CALL_COUNT, llmCallCount + 1)
                         .withVariable("needReplan", false)
                         .withMessage(AgentMessage.thought("Plan generated with " + plan.size() + " steps."));
 
@@ -206,14 +253,12 @@ public class PlanAndExecuteStrategy implements ExecutionStrategy<NodeContext> {
             if (previousPlan != null && !previousPlan.isEmpty()) {
                 sb.append("Previous execution observations:\n");
                 for (PlanStep step : previousPlan) {
-                    sb.append("Step ").append(step.getStepNumber())
-                            .append(" [").append(step.getToolName()).append("]: ");
                     if (step.getObservation() != null) {
-                        sb.append(step.getObservation());
-                    } else {
-                        sb.append("(not executed)");
+                        sb.append("Step ").append(step.getStepNumber())
+                                .append(" [").append(step.getToolName()).append("]: ");
+                        sb.append(step.isSuccess() ? "OK" : "FAIL").append(" - ");
+                        sb.append(step.getObservation()).append("\n");
                     }
-                    sb.append("\n");
                 }
                 sb.append("\nThe previous plan was insufficient. Please create a new plan that addresses the gaps.\n\n");
             }
@@ -249,6 +294,9 @@ public class PlanAndExecuteStrategy implements ExecutionStrategy<NodeContext> {
      *
      * <p>每个步骤执行后，把 observation 写回 {@link PlanStep}，
      * 并把更新后的计划列表写回 {@link AgentState}。</p>
+     *
+     * <p>注意：本节点只做执行，不做重新规划判断。
+     * 单步失败不会导致整个任务失败，而是把失败信息作为 observation 交给决策门处理。</p>
      */
     private class ExecuteNode implements AgentNode<NodeContext> {
 
@@ -261,8 +309,8 @@ public class PlanAndExecuteStrategy implements ExecutionStrategy<NodeContext> {
         public AgentState invoke(AgentState state, NodeContext ctx) {
             List<PlanStep> plan = state.getVariable(KEY_PLAN);
             if (plan == null || plan.isEmpty()) {
-                // 没有计划步骤，直接跳过执行进入评估
-                return state.withVariable("executionSummary", "No steps to execute.");
+                // 没有计划步骤，直接跳过执行进入决策门
+                return state.withVariable(KEY_EXECUTION_SUMMARY, "No steps to execute.");
             }
 
             log.debug("Executing plan with {} steps", plan.size());
@@ -286,7 +334,7 @@ public class PlanAndExecuteStrategy implements ExecutionStrategy<NodeContext> {
 
             return state.withVariable(KEY_PLAN, executedPlan)
                     .withVariable(KEY_CURRENT_STEP, executedPlan.size())
-                    .withVariable("executionSummary", summary.toString())
+                    .withVariable(KEY_EXECUTION_SUMMARY, summary.toString())
                     .withMessage(AgentMessage.observation(summary.toString()));
         }
 
@@ -315,7 +363,7 @@ public class PlanAndExecuteStrategy implements ExecutionStrategy<NodeContext> {
                     Tool tool = registry.get(toolName);
 
                     // GuardRail 检查
-                    if (!isToolAllowed(tool, ctx.getGuardRail(), tenantId, ctx.getUserId())) {
+                    if (ctx.getGuardRail() != null && !ctx.getGuardRail().allow(tool, tenantId, ctx.getUserId())) {
                         result.setObservation("Blocked by GuardRail: tool '" + toolName + "' is " + tool.riskLevel());
                         result.setSuccess(false);
                         result.setDurationMs(System.currentTimeMillis() - start);
@@ -361,89 +409,68 @@ public class PlanAndExecuteStrategy implements ExecutionStrategy<NodeContext> {
     }
 
     /**
-     * 评估节点：判断当前执行结果是否足以回答问题。
+     * 重新规划决策门：根据执行结果决定是否重新规划。
      *
-     * <p>让 LLM 做一个二分类决策：</p>
+     * <p>核心设计原则：</p>
      * <ul>
-     *     <li>结果充分 → 路由到 endNode</li>
-     *     <li>结果不充分 → 标记 needReplan=true，路由回 planNode</li>
+     *     <li><b>不因为单步失败就 replan</b>：部分步骤成功时，用已有结果直接回答</li>
+     *     <li><b>计划假设错误时才 replan</b>：所有步骤都失败，或所有结果都为空</li>
+     *     <li><b>预算耗尽时强制结束</b>：避免无限循环</li>
      * </ul>
+     *
+     * <p>这个节点是确定性的，不需要 LLM 调用，从而把 Plan-and-Execute 的
+     * 标准 LLM 调用次数降到 2 次（Plan + End）。</p>
      */
-    private class EvaluateNode implements AgentNode<NodeContext> {
+    private class ReplanGateNode implements AgentNode<NodeContext> {
 
         @Override
         public String name() {
-            return "evaluateNode";
+            return "replanGateNode";
         }
 
         @Override
         public AgentState invoke(AgentState state, NodeContext ctx) {
-            String query = state.getVariable(KEY_QUERY);
             List<PlanStep> plan = state.getVariable(KEY_PLAN);
-            int replanCount = state.getVariable(KEY_REPLAN_COUNT) == null
-                    ? 0 : (int) state.getVariable(KEY_REPLAN_COUNT);
-            String summary = state.getVariable("executionSummary");
+            int replanCount = getReplanCount(state);
 
-            // 超过最大重新规划次数，强制结束，避免无限循环
+            // 没有计划步骤，直接结束
+            if (plan == null || plan.isEmpty()) {
+                log.debug("No plan steps, route to end node");
+                return state.withVariable("needReplan", false)
+                        .withVariable("replanReason", "no_plan");
+            }
+
+            // 预算检查：replan 次数上限
             if (replanCount > MAX_REPLAN) {
                 log.warn("Max replan count reached, forcing completion");
                 return state.withVariable("needReplan", false)
-                        .withVariable("forceComplete", true)
-                        .withMessage(AgentMessage.system("Max replan reached, will provide best-effort answer."));
+                        .withVariable("replanReason", "max_replan_exceeded");
             }
 
-            // 没有步骤且直接回答的场景
-            if ((plan == null || plan.isEmpty()) && (summary == null || summary.isBlank())) {
+            long successCount = plan.stream().filter(PlanStep::isSuccess).count();
+            long nonEmptyCount = plan.stream()
+                    .filter(s -> s.isSuccess() && s.getObservation() != null && !s.getObservation().isBlank())
+                    .count();
+
+            // 所有步骤都成功：直接结束
+            if (successCount == plan.size() && nonEmptyCount == plan.size()) {
+                log.debug("All steps succeeded with non-empty results, route to end node");
                 return state.withVariable("needReplan", false)
-                        .withMessage(AgentMessage.system("No plan and no observations, answer directly."));
+                        .withVariable("replanReason", "all_success");
             }
 
-            String evalPrompt = buildEvaluatePrompt(query, plan, summary);
-
-            try {
-                String llmOutput = callLlm(ctx, evalPrompt).trim().toLowerCase();
-                boolean needReplan = llmOutput.contains("replan") || llmOutput.contains("insufficient");
-
-                log.debug("Evaluation result: needReplan={}", needReplan);
-
-                return state.withVariable("needReplan", needReplan)
-                        .withVariable("evaluationResult", llmOutput)
-                        .withMessage(AgentMessage.system("Evaluation: " + llmOutput));
-
-            } catch (Exception e) {
-                log.error("Failed to evaluate result", e);
-                // 评估失败时保守处理：直接结束，避免卡住
+            // 部分步骤成功：用已有结果回答，不 replan
+            // 这符合"不把 replan 当错误恢复"的原则
+            if (nonEmptyCount > 0) {
+                log.debug("Partial success with {} non-empty results, route to end node", nonEmptyCount);
                 return state.withVariable("needReplan", false)
-                        .withVariable("evaluationResult", "Evaluation failed: " + e.getMessage());
-            }
-        }
-
-        private String buildEvaluatePrompt(String query, List<PlanStep> plan, String summary) {
-            StringBuilder sb = new StringBuilder();
-            sb.append("You are evaluating whether the executed plan has gathered enough information to answer the user question.\n\n");
-            sb.append("User question: ").append(query).append("\n\n");
-
-            if (summary != null && !summary.isBlank()) {
-                sb.append("Execution summary:\n").append(summary).append("\n");
+                        .withVariable("replanReason", "partial_success");
             }
 
-            if (plan != null && !plan.isEmpty()) {
-                sb.append("Detailed observations:\n");
-                for (PlanStep step : plan) {
-                    sb.append("Step ").append(step.getStepNumber())
-                            .append(" [").append(step.getToolName()).append("]: ");
-                    sb.append(step.isSuccess() ? "OK" : "FAIL").append(" - ");
-                    sb.append(step.getObservation() != null ? step.getObservation() : "no observation");
-                    sb.append("\n");
-                }
-                sb.append("\n");
-            }
-
-            sb.append("Based on the observations, can the user question be answered completely and accurately?\n");
-            sb.append("Reply with exactly one word:\n");
-            sb.append("- 'sufficient' if the question can be answered\n");
-            sb.append("- 'replan' if more information is needed\n");
-            return sb.toString();
+            // 所有步骤都失败，或所有成功结果都为空：计划假设可能错误，需要 replan
+            log.warn("All steps failed or returned empty, need replan. replanCount={}", replanCount);
+            return state.withVariable("needReplan", true)
+                    .withVariable("replanReason", successCount == 0 ? "all_failed" : "all_empty");
         }
     }
 
@@ -461,6 +488,13 @@ public class PlanAndExecuteStrategy implements ExecutionStrategy<NodeContext> {
         public AgentState invoke(AgentState state, NodeContext ctx) {
             String query = state.getVariable(KEY_QUERY);
             List<PlanStep> plan = state.getVariable(KEY_PLAN);
+            int llmCallCount = getLlmCallCount(state);
+
+            // 预算检查
+            if (llmCallCount >= MAX_LLM_CALLS) {
+                String budgetMessage = "LLM call budget exhausted. Best-effort answer based on available observations.";
+                return state.completed(budgetMessage);
+            }
 
             StringBuilder sb = new StringBuilder();
             sb.append("Based on the following observations, answer the user question concisely.\n\n");
@@ -471,6 +505,7 @@ public class PlanAndExecuteStrategy implements ExecutionStrategy<NodeContext> {
                 for (PlanStep step : plan) {
                     sb.append("Step ").append(step.getStepNumber())
                             .append(" [").append(step.getToolName()).append("]: ");
+                    sb.append(step.isSuccess() ? "OK" : "FAIL").append(" - ");
                     sb.append(step.getObservation() != null ? step.getObservation() : "no result");
                     sb.append("\n");
                 }
@@ -482,7 +517,8 @@ public class PlanAndExecuteStrategy implements ExecutionStrategy<NodeContext> {
 
             try {
                 String finalAnswer = callLlm(ctx, sb.toString());
-                return state.completed(finalAnswer);
+                return state.completed(finalAnswer)
+                        .withVariable(KEY_LLM_CALL_COUNT, llmCallCount + 1);
             } catch (Exception e) {
                 log.error("Failed to generate final answer", e);
                 String fallback = "Failed to generate final answer: " + e.getMessage();
@@ -515,8 +551,7 @@ public class PlanAndExecuteStrategy implements ExecutionStrategy<NodeContext> {
     /**
      * 列出当前场景下所有可用工具的描述信息。
      *
-     * <p>同时包含本地 ToolRegistry 和 MCP Gateway 中的工具，
-     * 供规划 prompt 使用。</p>
+     * <p>同时包含本地 ToolRegistry 和 MCP Gateway 中的工具，供规划 prompt 使用。</p>
      */
     private String listToolDescriptions(NodeContext ctx) {
         List<String> lines = new ArrayList<>();
@@ -545,16 +580,18 @@ public class PlanAndExecuteStrategy implements ExecutionStrategy<NodeContext> {
     }
 
     /**
-     * 检查工具是否允许被当前租户/用户调用。
-     *
-     * <p>只做 GuardRail 风险等级校验，不替代具体业务权限判断。</p>
+     * 从状态中获取重新规划次数，默认 0。
      */
-    private boolean isToolAllowed(Tool tool,
-                                  com.core.agent.guardrail.domain.GuardRail guardRail,
-                                  String tenantId, String userId) {
-        if (guardRail == null) {
-            return true;
-        }
-        return guardRail.allow(tool, tenantId, userId);
+    private int getReplanCount(AgentState state) {
+        Integer count = state.getVariable(KEY_REPLAN_COUNT);
+        return count == null ? 0 : count;
+    }
+
+    /**
+     * 从状态中获取 LLM 调用次数，默认 0。
+     */
+    private int getLlmCallCount(AgentState state) {
+        Integer count = state.getVariable(KEY_LLM_CALL_COUNT);
+        return count == null ? 0 : count;
     }
 }
