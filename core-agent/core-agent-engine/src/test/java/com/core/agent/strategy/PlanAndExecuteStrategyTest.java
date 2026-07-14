@@ -106,8 +106,8 @@ class PlanAndExecuteStrategyTest {
                             "\"purpose\": \"retrieve documents about fire escape routes\"" +
                             "}]";
                 } else {
-                    // 第二次调用：结束节点生成最终答案
-                    content = "The fire escape route is on the north side.";
+                    // 第二次调用：结束节点生成最终答案（结构化格式）
+                    content = "Confidence: HIGH\nCitations: [doc-1001]\nFinal Answer: The fire escape route is on the north side.";
                 }
                 return buildResponse(content);
             }
@@ -159,6 +159,7 @@ class PlanAndExecuteStrategyTest {
         // 验证
         assertTrue(result.isCompleted(), "Graph should complete successfully");
         assertEquals("The fire escape route is on the north side.", result.getFinalAnswer());
+        assertEquals("HIGH", result.getFinalState().getVariable("answerConfidence"));
         assertEquals(1, toolCallCount.get(), "Retriever tool should be called exactly once");
     }
 
@@ -191,8 +192,8 @@ class PlanAndExecuteStrategyTest {
             @Override
             public String execute(String input) {
                 int count = toolCallCount.incrementAndGet();
-                // 第一次返回空，触发 replan；第二次返回非空结果
-                return count == 1 ? "" : "relevant result after replan";
+                // 第一次返回空，触发 replan；第二次返回带引用的非空结果
+                return count == 1 ? "" : "[doc-1001] relevant result after replan";
             }
         });
 
@@ -211,8 +212,8 @@ class PlanAndExecuteStrategyTest {
                     // 重新规划
                     content = "[{\"stepNumber\": 1, \"toolName\": \"retriever\", \"toolInput\": \"second query\", \"purpose\": \"second try\"}]";
                 } else {
-                    // 最终答案
-                    content = "Answer after replanning.";
+                    // 最终答案（结构化格式）
+                    content = "Confidence: HIGH\nCitations: [doc-1001]\nFinal Answer: Answer after replanning.";
                 }
                 return buildResponse(content);
             }
@@ -261,6 +262,7 @@ class PlanAndExecuteStrategyTest {
 
         assertTrue(result.isCompleted(), "Graph should complete after replan");
         assertEquals("Answer after replanning.", result.getFinalAnswer());
+        assertEquals("HIGH", result.getFinalState().getVariable("answerConfidence"));
         assertEquals(2, toolCallCount.get(), "Tool should be called twice (original + replan)");
     }
 
@@ -291,8 +293,8 @@ class PlanAndExecuteStrategyTest {
 
             @Override
             public String execute(String input) {
-                // 模拟部分成功：只有特定输入能查到结果
-                return input.contains("good") ? "good result" : "";
+                // 模拟部分成功：只有特定输入能查到带引用的结果
+                return input.contains("good") ? "[doc-1001] good result" : "";
             }
         });
 
@@ -311,7 +313,7 @@ class PlanAndExecuteStrategyTest {
                             "{\"stepNumber\": 2, \"toolName\": \"retriever\", \"toolInput\": \"bad query\", \"purpose\": \"will return empty\"}" +
                             "]";
                 } else {
-                    content = "Final answer based on partial results.";
+                    content = "Confidence: MEDIUM\nCitations: [doc-1001]\nFinal Answer: Final answer based on partial results.";
                 }
                 return buildResponse(content);
             }
@@ -360,6 +362,7 @@ class PlanAndExecuteStrategyTest {
 
         assertTrue(result.isCompleted(), "Graph should complete without replan");
         assertEquals("Final answer based on partial results.", result.getFinalAnswer());
+        assertEquals("MEDIUM", result.getFinalState().getVariable("answerConfidence"));
         // 验证只调用了 2 次 LLM：规划 + 最终答案，没有额外的 replan 规划
         assertEquals(2, (int) result.getFinalState().getVariable("llmCallCount"));
     }

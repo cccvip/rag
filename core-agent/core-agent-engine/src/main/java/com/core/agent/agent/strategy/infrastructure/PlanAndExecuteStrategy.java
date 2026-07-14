@@ -22,6 +22,7 @@ import org.springframework.ai.chat.prompt.Prompt;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
@@ -322,6 +323,12 @@ public class PlanAndExecuteStrategy implements ExecutionStrategy<NodeContext> {
                 PlanStep executed = executeStep(step, ctx);
                 executedPlan.add(executed);
 
+                // 记录检索召回的文档 ID，用于最终答案的引用校验
+                if (executed.isSuccess() && executed.getObservation() != null
+                        && ctx.getMetricsTracker() != null) {
+                    ctx.getMetricsTracker().recordRetrievedDocs(executed.getObservation());
+                }
+
                 summary.append("Step ").append(executed.getStepNumber())
                         .append(" [").append(executed.getToolName()).append("]: ");
                 if (executed.isSuccess()) {
@@ -475,7 +482,20 @@ public class PlanAndExecuteStrategy implements ExecutionStrategy<NodeContext> {
     }
 
     /**
-     * 结束节点：根据所有观察结果生成最终答案。
+     * 结束节点：根据所有观察结果生成带引用和可信度的最终答案。
+     *
+     * <p>本节点要求 LLM 按固定格式输出：</p>
+     * <pre>
+     * Confidence: HIGH | MEDIUM | LOW
+     * Citations: [doc-1001], [doc-1002]
+     * Final Answer: xxx
+     * </pre>
+     *
+     * <p>输出后会做两层校验：</p>
+     * <ol>
+     *     <li>引用校验：所有 [doc-xxxx] 必须来自实际召回的文档</li>
+     *     <li>可信度调整：如果引用无效或观察结果不足，自动降级为 LOW</li>
+     * </ol>
      */
     private class EndNode implements AgentNode<NodeContext> {
 
@@ -496,8 +516,60 @@ public class PlanAndExecuteStrategy implements ExecutionStrategy<NodeContext> {
                 return state.completed(budgetMessage);
             }
 
+            String prompt = buildFinalAnswerPrompt(query, plan);
+
+            try {
+                String llmOutput = callLlm(ctx, prompt);
+                FinalAnswerResult parsed = parseFinalAnswer(llmOutput);
+
+                // 引用校验
+                Set<String> retrievedDocIds = ctx.getMetricsTracker() != null
+                        ? ctx.getMetricsTracker().getRetrievedDocIds()
+                        : Set.of();
+                CitationValidation validation = validateCitations(parsed.getCitations(), retrievedDocIds);
+
+                // 如果引用无效或观察结果不足，强制降级可信度
+                String confidence = adjustConfidence(parsed.getConfidence(), validation, plan);
+
+                String finalAnswer = parsed.getFinalAnswer();
+
+                // 高风险场景：引用无效或可信度 LOW 时，给答案加安全前缀
+                if ("LOW".equals(confidence)) {
+                    finalAnswer = "[可信度：低] " + finalAnswer;
+                } else if (!validation.isValid()) {
+                    finalAnswer = "[引用待核实] " + finalAnswer;
+                }
+
+                return state.completed(finalAnswer)
+                        .withVariable(KEY_LLM_CALL_COUNT, llmCallCount + 1)
+                        .withVariable("answerConfidence", confidence)
+                        .withVariable("answerCitations", String.join(", ", parsed.getCitations()))
+                        .withVariable("invalidCitations", String.join(", ", validation.getInvalidCitations()));
+
+            } catch (Exception e) {
+                log.error("Failed to generate final answer", e);
+                String fallback = "Failed to generate final answer: " + e.getMessage();
+                return state.completed(fallback)
+                        .withVariable("answerConfidence", "LOW");
+            }
+        }
+
+        /**
+         * 构建最终答案生成 prompt。
+         */
+        private String buildFinalAnswerPrompt(String query, List<PlanStep> plan) {
             StringBuilder sb = new StringBuilder();
-            sb.append("Based on the following observations, answer the user question concisely.\n\n");
+            sb.append("You are a careful assistant. Based on the following observations, answer the user question.\n\n");
+            sb.append("Strict rules:\n");
+            sb.append("1. Only use information from the observations below.\n");
+            sb.append("2. Cite sources using [doc-xxxx] format when referencing specific facts.\n");
+            sb.append("3. If the observations do not contain enough information, say '\u8d44\u6599\u4e2d\u672a\u660e\u786e\u63d0\u53ca'.\n");
+            sb.append("4. Do not infer floor numbers, locations, or other precise facts not present in observations.\n");
+            sb.append("5. Output in this exact format:\n");
+            sb.append("Confidence: HIGH | MEDIUM | LOW\n");
+            sb.append("Citations: [doc-xxxx], [doc-yyyy]   (or 'None' if no citations)\n");
+            sb.append("Final Answer: your concise answer\n\n");
+
             sb.append("User question: ").append(query).append("\n\n");
 
             if (plan != null && !plan.isEmpty()) {
@@ -510,20 +582,163 @@ public class PlanAndExecuteStrategy implements ExecutionStrategy<NodeContext> {
                     sb.append("\n");
                 }
             } else {
-                sb.append("No tool observations available. Answer based on your knowledge.\n");
+                sb.append("No tool observations available.\n");
             }
 
-            sb.append("\nFinal Answer:");
+            sb.append("\nConfidence: ");
+            return sb.toString();
+        }
 
-            try {
-                String finalAnswer = callLlm(ctx, sb.toString());
-                return state.completed(finalAnswer)
-                        .withVariable(KEY_LLM_CALL_COUNT, llmCallCount + 1);
-            } catch (Exception e) {
-                log.error("Failed to generate final answer", e);
-                String fallback = "Failed to generate final answer: " + e.getMessage();
-                return state.completed(fallback);
+        /**
+         * 解析 LLM 输出的结构化最终答案。
+         */
+        private FinalAnswerResult parseFinalAnswer(String llmOutput) {
+            String confidence = "LOW";
+            List<String> citations = new ArrayList<>();
+            String finalAnswer = llmOutput;
+
+            // 按行解析
+            String[] lines = llmOutput.split("\n");
+            StringBuilder answerBuilder = new StringBuilder();
+            boolean inAnswer = false;
+
+            for (String line : lines) {
+                String trimmed = line.trim();
+                if (trimmed.startsWith("Confidence:")) {
+                    confidence = trimmed.substring("Confidence:".length()).trim().toUpperCase();
+                } else if (trimmed.startsWith("Citations:")) {
+                    String citationLine = trimmed.substring("Citations:".length()).trim();
+                    citations = extractCitations(citationLine);
+                } else if (trimmed.startsWith("Final Answer:")) {
+                    inAnswer = true;
+                    answerBuilder.append(trimmed.substring("Final Answer:".length()).trim());
+                } else if (inAnswer) {
+                    answerBuilder.append("\n").append(trimmed);
+                }
             }
+
+            if (answerBuilder.length() > 0) {
+                finalAnswer = answerBuilder.toString().trim();
+            }
+
+            // 规范化 confidence
+            if (!confidence.equals("HIGH") && !confidence.equals("MEDIUM") && !confidence.equals("LOW")) {
+                confidence = "LOW";
+            }
+
+            return new FinalAnswerResult(confidence, citations, finalAnswer);
+        }
+
+        /**
+         * 从字符串中提取 [doc-xxxx] 引用。
+         */
+        private List<String> extractCitations(String text) {
+            List<String> result = new ArrayList<>();
+            if (text == null || text.isBlank() || text.equalsIgnoreCase("none")) {
+                return result;
+            }
+            java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("\\[doc-([^\\]]+)\\]")
+                    .matcher(text);
+            while (matcher.find()) {
+                result.add("[doc-" + matcher.group(1) + "]");
+            }
+            return result;
+        }
+
+        /**
+         * 校验引用是否来自实际召回的文档。
+         */
+        private CitationValidation validateCitations(List<String> citations, Set<String> retrievedDocIds) {
+            List<String> invalid = new ArrayList<>();
+            for (String citation : citations) {
+                String docId = citation.replace("[doc-", "").replace("]", "");
+                if (!retrievedDocIds.contains(docId)) {
+                    invalid.add(citation);
+                }
+            }
+            return new CitationValidation(invalid.isEmpty(), invalid);
+        }
+
+        /**
+         * 根据引用校验和观察结果调整可信度。
+         */
+        private String adjustConfidence(String originalConfidence, CitationValidation validation, List<PlanStep> plan) {
+            // 如果有无效引用，直接降级为 LOW
+            if (!validation.isValid()) {
+                return "LOW";
+            }
+
+            // 如果没有观察结果，最高只能 MEDIUM
+            if (plan == null || plan.isEmpty()) {
+                return "LOW";
+            }
+
+            long successCount = plan.stream().filter(PlanStep::isSuccess).count();
+            long nonEmptyCount = plan.stream()
+                    .filter(s -> s.isSuccess() && s.getObservation() != null && !s.getObservation().isBlank())
+                    .count();
+
+            // 没有任何成功非空结果，强制 LOW
+            if (nonEmptyCount == 0) {
+                return "LOW";
+            }
+
+            // 部分失败但未影响结果，最高 MEDIUM
+            if (successCount < plan.size()) {
+                if ("HIGH".equals(originalConfidence)) {
+                    return "MEDIUM";
+                }
+            }
+
+            return originalConfidence;
+        }
+    }
+
+    /**
+     * 最终答案解析结果。
+     */
+    private static class FinalAnswerResult {
+        private final String confidence;
+        private final List<String> citations;
+        private final String finalAnswer;
+
+        FinalAnswerResult(String confidence, List<String> citations, String finalAnswer) {
+            this.confidence = confidence;
+            this.citations = citations;
+            this.finalAnswer = finalAnswer;
+        }
+
+        String getConfidence() {
+            return confidence;
+        }
+
+        List<String> getCitations() {
+            return citations;
+        }
+
+        String getFinalAnswer() {
+            return finalAnswer;
+        }
+    }
+
+    /**
+     * 引用校验结果。
+     */
+    private static class CitationValidation {
+        private final boolean valid;
+        private final List<String> invalidCitations;
+
+        CitationValidation(boolean valid, List<String> invalidCitations) {
+            this.valid = valid;
+            this.invalidCitations = invalidCitations;
+        }
+
+        boolean isValid() {
+            return valid;
+        }
+
+        List<String> getInvalidCitations() {
+            return invalidCitations;
         }
     }
 

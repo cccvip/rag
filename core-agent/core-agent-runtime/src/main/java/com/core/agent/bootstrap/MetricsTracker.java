@@ -112,6 +112,13 @@ public class MetricsTracker {
     }
 
     /**
+     * 获取已召回文档 ID 集合（只读副本）。
+     */
+    public Set<String> getRetrievedDocIds() {
+        return new HashSet<>(retrievedDocIds);
+    }
+
+    /**
      * 根据最终答案中的引用标记和已召回文档，计算证据引用准确率。
      */
     public void computeCitationAccuracy(String finalAnswer) {
