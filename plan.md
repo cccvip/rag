@@ -187,7 +187,7 @@ ReActStrategy PlanStrategy ReflectStrategy HITLCheckpoint
 
 | # | 任务 | 说明 | 预计工时 | 产出文件 |
 |---|------|------|---------|--------|
-| 2.1 | 实现 `PlanAndExecuteStrategy` | Plan 节点生成步骤列表，Execute 节点逐项执行 | 1.5d | `agent/strategy/infrastructure/PlanAndExecuteStrategy.java` |
+| ✅ 2.1 | 实现 `PlanAndExecuteStrategy` | Plan 节点生成步骤列表，Execute 节点逐项执行 | 1.5d | `agent/strategy/infrastructure/PlanAndExecuteStrategy.java` |
 | 2.2 | 实现 `ReflectionStrategy` | 在任意节点失败后插入反思重试子图 | 1d | `agent/strategy/infrastructure/ReflectionStrategy.java` |
 | 2.3 | 实现 `ParallelToolExecutor` | 并行调用多个工具，聚合结果 | 1d | `tool/infrastructure/ParallelToolExecutor.java` |
 | 2.4 | 接入 Spring AI Function Calling | 用 `FunctionCallback` 替换字符串解析 | 2d | `tool/infrastructure/SpringAiToolAdapter.java` |
