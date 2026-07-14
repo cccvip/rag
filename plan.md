@@ -238,10 +238,10 @@ ReActStrategy PlanStrategy ReflectStrategy HITLCheckpoint
 
 | 阶段 | 主题 | 预计工时 | 里程碑 |
 |:---|:---|:---|:---|
-| 第一阶段 | 状态图底座 + ReAct 重构 | 5.5 天 | ✅ 状态图引擎落地，42 个测试全绿 |
-| 第二阶段 | 高级策略 + 并行工具 + Function Calling | 6.5 天 | Plan/Reflection 策略 + 并行工具 |
-| 第三阶段 | HITL + 多 Agent | 4.5 天 | 人工审批 + Supervisor/Worker |
-| 第四阶段 | 评估框架 + 文档 | 3.5 天 | Eval + 文档对齐 |
+| 第一阶段 | 状态图底座 + ReAct 重构 | 5.5 天 | ✅ 已完成：状态图引擎落地，42 个测试全绿 |
+| 第二阶段 | 高级策略 + 并行工具 + Function Calling | 6.5 天 | 🟡 进行中：✅ 2.1 Plan-and-Execute，剩余 Reflection/并行工具/Function Calling |
+| 第三阶段 | HITL + 多 Agent | 4.5 天 | ⏳ 未开始：人工审批 + Supervisor/Worker |
+| 第四阶段 | 评估框架 + 文档 | 3.5 天 | ⏳ 未开始：Eval + 文档对齐 |
 | **合计** | | **约 20 天** | |
 
 ---
@@ -259,9 +259,11 @@ ReActStrategy PlanStrategy ReflectStrategy HITLCheckpoint
 
 ## 下一步建议
 
-进入 **阶段二**，因为：
-- 状态图底座已稳定，可以在其上叠加高级策略
-- Plan-and-Execute 是面试中最常被问到的 Agent 模式之一
-- 并行工具和 Function Calling 能直接解决当前 ReAct 的痛点（字符串解析脆弱、工具串行低效）
+阶段二 2.1 已完成，建议继续 **阶段二 2.2 或 2.3**：
+
+- **2.2 ReflectionStrategy**：在 Plan-and-Execute 基础上增加失败反思能力，面试价值高
+- **2.3 ParallelToolExecutor**：让 Plan-and-Execute 的多个独立步骤并行执行，性能收益直接
+
+推荐先做 **2.3 ParallelToolExecutor**，因为它和刚完成的 Plan-and-Execute 天然搭配，且实现相对独立。
 
 具体可以从 **2.1（PlanAndExecuteStrategy）** 开始，让 RAG 查询可以先规划再执行多步检索。
