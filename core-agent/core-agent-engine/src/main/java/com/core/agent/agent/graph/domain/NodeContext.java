@@ -5,6 +5,9 @@ import com.core.agent.context.application.ContextManager;
 import com.core.agent.guardrail.domain.GuardRail;
 import com.core.agent.mcp.infrastructure.McpGateway;
 import com.core.agent.memory.application.MemoryManager;
+import com.core.agent.memory.application.SharedMemoryManager;
+import com.core.agent.multiagent.application.AgentRegistry;
+import com.core.agent.multiagent.domain.A2aGateway;
 import com.core.agent.tenant.domain.TenantCtrl;
 import com.core.agent.tool.domain.ToolRegistry;
 import com.core.agent.trace.domain.AgentTracer;
@@ -39,6 +42,15 @@ public class NodeContext {
 
     /** 记忆管理器 */
     private MemoryManager memoryManager;
+
+    /** 跨 Agent 共享记忆管理器 */
+    private SharedMemoryManager sharedMemoryManager;
+
+    /** Agent Card 注册表 */
+    private AgentRegistry agentRegistry;
+
+    /** A2A 协议 Gateway */
+    private A2aGateway a2aGateway;
 
     /** 租户管控 */
     private TenantCtrl tenantCtrl;

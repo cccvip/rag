@@ -6,6 +6,7 @@ import com.core.agent.agent.graph.domain.AgentNode;
 import com.core.agent.agent.graph.domain.AgentState;
 import com.core.agent.agent.graph.domain.NodeContext;
 import com.core.agent.agent.strategy.domain.ExecutionStrategy;
+import com.core.agent.agent.strategy.domain.PlanPromptBuilder;
 import com.core.agent.bootstrap.MetricsTracker;
 import com.core.agent.mcp.infrastructure.McpGateway;
 import com.core.agent.tool.domain.Tool;
@@ -25,7 +26,6 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
-import java.util.stream.Collectors;
 
 /**
  * Plan-and-Execute 执行策略。
@@ -49,6 +49,9 @@ import java.util.stream.Collectors;
  *     <li>确定性流程：步骤之间依赖关系清晰，不希望 LLM 每一步都重新决策</li>
  *     <li>成本敏感场景：减少 LLM 调用次数</li>
  * </ul>
+ *
+ * <p>prompt 文本通过 {@link PlanPromptBuilder} 注入，本类默认使用 {@link DefaultPlanPromptBuilder}。
+ * 业务场景（如 RAG）可以自定义 builder，把特定输出格式、引用规范、拒答话术等隔离在策略之外。</p>
  */
 public class PlanAndExecuteStrategy implements ExecutionStrategy<NodeContext> {
 
@@ -119,8 +122,15 @@ public class PlanAndExecuteStrategy implements ExecutionStrategy<NodeContext> {
 
     private final String scene;
 
+    private final PlanPromptBuilder promptBuilder;
+
     public PlanAndExecuteStrategy(String scene) {
+        this(scene, new DefaultPlanPromptBuilder());
+    }
+
+    public PlanAndExecuteStrategy(String scene, PlanPromptBuilder promptBuilder) {
         this.scene = scene;
+        this.promptBuilder = promptBuilder != null ? promptBuilder : new DefaultPlanPromptBuilder();
     }
 
     @Override
@@ -200,7 +210,7 @@ public class PlanAndExecuteStrategy implements ExecutionStrategy<NodeContext> {
             log.debug("Planning for query: {}, replanCount: {}", query, replanCount);
 
             // 构造规划 prompt
-            String planPrompt = buildPlanPrompt(query, previousPlan, ctx);
+            String planPrompt = promptBuilder.buildPlanPrompt(query, previousPlan, ctx);
 
             try {
                 String llmOutput = callLlm(ctx, planPrompt);
@@ -237,42 +247,6 @@ public class PlanAndExecuteStrategy implements ExecutionStrategy<NodeContext> {
                 log.error("Failed to generate plan", e);
                 return state.error("Plan generation failed: " + e.getMessage());
             }
-        }
-
-        /**
-         * 构建规划 prompt。
-         *
-         * <p>要求 LLM 输出 JSON 数组，每个元素包含 stepNumber、toolName、toolInput、purpose。</p>
-         */
-        private String buildPlanPrompt(String query, List<PlanStep> previousPlan, NodeContext ctx) {
-            StringBuilder sb = new StringBuilder();
-            sb.append("You are a planning assistant. Given a user question, create a step-by-step plan to solve it using available tools.\n\n");
-            sb.append("Available tools:\n");
-            sb.append(listToolDescriptions(ctx)).append("\n\n");
-
-            // 重新规划时，带上之前的观察结果
-            if (previousPlan != null && !previousPlan.isEmpty()) {
-                sb.append("Previous execution observations:\n");
-                for (PlanStep step : previousPlan) {
-                    if (step.getObservation() != null) {
-                        sb.append("Step ").append(step.getStepNumber())
-                                .append(" [").append(step.getToolName()).append("]: ");
-                        sb.append(step.isSuccess() ? "OK" : "FAIL").append(" - ");
-                        sb.append(step.getObservation()).append("\n");
-                    }
-                }
-                sb.append("\nThe previous plan was insufficient. Please create a new plan that addresses the gaps.\n\n");
-            }
-
-            sb.append("User question: ").append(query).append("\n\n");
-            sb.append("Output a JSON array of steps. Each step must have:\n");
-            sb.append("- stepNumber: integer starting from 1\n");
-            sb.append("- toolName: name of the tool to call\n");
-            sb.append("- toolInput: input string for the tool\n");
-            sb.append("- purpose: brief description of why this step is needed\n\n");
-            sb.append("If the question can be answered directly without tools, output an empty array [].\n");
-            sb.append("Output only valid JSON, no markdown formatting.");
-            return sb.toString();
         }
 
         /**
@@ -482,18 +456,16 @@ public class PlanAndExecuteStrategy implements ExecutionStrategy<NodeContext> {
     }
 
     /**
-     * 结束节点：根据所有观察结果生成带引用和可信度的最终答案。
+     * 结束节点：根据所有观察结果生成最终答案。
      *
-     * <p>本节点要求 LLM 按固定格式输出：</p>
-     * <pre>
-     * Confidence: HIGH | MEDIUM | LOW
-     * Citations: [doc-1001], [doc-1002]
-     * Final Answer: xxx
-     * </pre>
+     * <p>本节点把最终答案生成委托给注入的 {@link PlanPromptBuilder}，
+     * 因此输出格式由具体的 builder 决定。默认 builder 只要求包含
+     * {@code Confidence} 和 {@code Final Answer}；业务场景可以通过自定义 builder
+     * 增加 {@code Citations: [doc-xxxx]} 等字段。</p>
      *
      * <p>输出后会做两层校验：</p>
      * <ol>
-     *     <li>引用校验：所有 [doc-xxxx] 必须来自实际召回的文档</li>
+     *     <li>引用校验：如果 LLM 输出包含 {@code [doc-xxxx]}，必须来自实际召回的文档</li>
      *     <li>可信度调整：如果引用无效或观察结果不足，自动降级为 LOW</li>
      * </ol>
      */
@@ -513,10 +485,13 @@ public class PlanAndExecuteStrategy implements ExecutionStrategy<NodeContext> {
             // 预算检查
             if (llmCallCount >= MAX_LLM_CALLS) {
                 String budgetMessage = "LLM call budget exhausted. Best-effort answer based on available observations.";
-                return state.completed(budgetMessage);
+                return state.completed(budgetMessage)
+                        .withVariable("answerConfidence", "LOW")
+                        .withVariable("answerCitations", "")
+                        .withVariable("answerSuccess", false);
             }
 
-            String prompt = buildFinalAnswerPrompt(query, plan);
+            String prompt = promptBuilder.buildFinalAnswerPrompt(query, plan);
 
             try {
                 String llmOutput = callLlm(ctx, prompt);
@@ -540,53 +515,22 @@ public class PlanAndExecuteStrategy implements ExecutionStrategy<NodeContext> {
                     finalAnswer = "[引用待核实] " + finalAnswer;
                 }
 
+                boolean success = !"LOW".equals(confidence);
                 return state.completed(finalAnswer)
                         .withVariable(KEY_LLM_CALL_COUNT, llmCallCount + 1)
                         .withVariable("answerConfidence", confidence)
                         .withVariable("answerCitations", String.join(", ", parsed.getCitations()))
-                        .withVariable("invalidCitations", String.join(", ", validation.getInvalidCitations()));
+                        .withVariable("invalidCitations", String.join(", ", validation.getInvalidCitations()))
+                        .withVariable("answerSuccess", success);
 
             } catch (Exception e) {
                 log.error("Failed to generate final answer", e);
                 String fallback = "Failed to generate final answer: " + e.getMessage();
                 return state.completed(fallback)
-                        .withVariable("answerConfidence", "LOW");
+                        .withVariable("answerConfidence", "LOW")
+                        .withVariable("answerCitations", "")
+                        .withVariable("answerSuccess", false);
             }
-        }
-
-        /**
-         * 构建最终答案生成 prompt。
-         */
-        private String buildFinalAnswerPrompt(String query, List<PlanStep> plan) {
-            StringBuilder sb = new StringBuilder();
-            sb.append("You are a careful assistant. Based on the following observations, answer the user question.\n\n");
-            sb.append("Strict rules:\n");
-            sb.append("1. Only use information from the observations below.\n");
-            sb.append("2. Cite sources using [doc-xxxx] format when referencing specific facts.\n");
-            sb.append("3. If the observations do not contain enough information, say '\u8d44\u6599\u4e2d\u672a\u660e\u786e\u63d0\u53ca'.\n");
-            sb.append("4. Do not infer floor numbers, locations, or other precise facts not present in observations.\n");
-            sb.append("5. Output in this exact format:\n");
-            sb.append("Confidence: HIGH | MEDIUM | LOW\n");
-            sb.append("Citations: [doc-xxxx], [doc-yyyy]   (or 'None' if no citations)\n");
-            sb.append("Final Answer: your concise answer\n\n");
-
-            sb.append("User question: ").append(query).append("\n\n");
-
-            if (plan != null && !plan.isEmpty()) {
-                sb.append("Observations:\n");
-                for (PlanStep step : plan) {
-                    sb.append("Step ").append(step.getStepNumber())
-                            .append(" [").append(step.getToolName()).append("]: ");
-                    sb.append(step.isSuccess() ? "OK" : "FAIL").append(" - ");
-                    sb.append(step.getObservation() != null ? step.getObservation() : "no result");
-                    sb.append("\n");
-                }
-            } else {
-                sb.append("No tool observations available.\n");
-            }
-
-            sb.append("\nConfidence: ");
-            return sb.toString();
         }
 
         /**
@@ -761,37 +705,6 @@ public class PlanAndExecuteStrategy implements ExecutionStrategy<NodeContext> {
         });
 
         return future.get(LLM_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-    }
-
-    /**
-     * 列出当前场景下所有可用工具的描述信息。
-     *
-     * <p>同时包含本地 ToolRegistry 和 MCP Gateway 中的工具，供规划 prompt 使用。</p>
-     */
-    private String listToolDescriptions(NodeContext ctx) {
-        List<String> lines = new ArrayList<>();
-        String tenantId = ctx.getTenantId();
-        String sceneName = scene != null ? scene : ctx.getScene();
-
-        McpGateway mcpGateway = ctx.getMcpGateway();
-        if (mcpGateway != null) {
-            for (var tool : mcpGateway.listTools(tenantId, sceneName)) {
-                lines.add("- " + tool.getName()
-                        + "(" + tool.getRiskLevel() + "): " + tool.getDescription());
-            }
-        }
-
-        ToolRegistry registry = ctx.getToolRegistry();
-        if (registry != null) {
-            for (Tool tool : registry.all()) {
-                lines.add("- " + tool.name()
-                        + "(" + tool.riskLevel() + "): " + tool.description());
-            }
-        }
-
-        return lines.isEmpty()
-                ? "(no tools available)"
-                : lines.stream().collect(Collectors.joining("\n"));
     }
 
     /**

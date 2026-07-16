@@ -1,6 +1,7 @@
 package com.core.agent;
 
 import com.core.agent.agent.domain.Agent;
+import com.core.agent.agent.domain.AgentResult;
 import com.core.agent.bootstrap.MetricsTracker;
 import com.core.agent.context.application.ContextManager;
 import com.core.agent.context.infrastructure.DefaultContextStrategy;
@@ -28,6 +29,7 @@ import reactor.core.publisher.Flux;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -304,6 +306,96 @@ class AgentTest {
 
         assertTrue(answer.contains("LLM call failed"), "Should return LLM failure message");
         assertTrue(answer.contains("API rate limit exceeded"), "Should include original error");
+    }
+
+    @Test
+    void shouldReturnAgentResultWithConfidenceAndCitations() throws Exception {
+        ToolRegistry registry = new ToolRegistry();
+        registry.register(new Tool() {
+            @Override
+            public String name() {
+                return "retriever";
+            }
+
+            @Override
+            public String description() {
+                return "retrieve docs";
+            }
+
+            @Override
+            public RiskLevel riskLevel() {
+                return RiskLevel.LOW;
+            }
+
+            @Override
+            public String execute(String input) {
+                return "[doc-1001] procedure doc [doc-1002] safety doc";
+            }
+        });
+
+        MemoryManager memoryManager = new InMemoryMemoryManager(new InMemoryMemoryStore(), estimator, 2000);
+        MetricsTracker metrics = new MetricsTracker();
+
+        ChatModel mockModel = new ChatModel() {
+            @Override
+            public ChatResponse call(Prompt prompt) {
+                return buildResponse("Final Answer: recovered with [doc-1001] citation");
+            }
+
+            @Override
+            public Flux<ChatResponse> stream(Prompt prompt) {
+                return Flux.empty();
+            }
+
+            @Override
+            public ChatOptions getDefaultOptions() {
+                return null;
+            }
+        };
+
+        Agent agent = new Agent(mockModel, registry, new GuardRail(), metrics,
+                memoryManager, contextManager(), 5);
+        AgentResult result = agent.runWithResult("session-result", "chemical spill procedure");
+
+        assertEquals("recovered with [doc-1001] citation", result.getAnswer());
+        assertEquals("HIGH", result.getConfidence());
+        assertEquals(java.util.List.of("doc-1001"), result.getCitations());
+        assertTrue(result.isCompleted());
+        assertTrue(result.isSuccess());
+    }
+
+    @Test
+    void shouldReturnLowConfidenceWhenLlmFails() throws Exception {
+        MemoryManager memoryManager = new InMemoryMemoryManager(new InMemoryMemoryStore(), estimator, 2000);
+        MetricsTracker metrics = new MetricsTracker();
+
+        ChatModel failingModel = new ChatModel() {
+            @Override
+            public ChatResponse call(Prompt prompt) {
+                throw new RuntimeException("API error");
+            }
+
+            @Override
+            public Flux<ChatResponse> stream(Prompt prompt) {
+                return Flux.empty();
+            }
+
+            @Override
+            public ChatOptions getDefaultOptions() {
+                return null;
+            }
+        };
+
+        Agent agent = new Agent(failingModel, new ToolRegistry(), new GuardRail(), metrics,
+                memoryManager, contextManager(), new DefaultContextStrategy(), 3,
+                "tenant", "user", 2000, 60, 30, 1);
+        AgentResult result = agent.runWithResult("session-llm-fail", "test");
+
+        assertTrue(result.getAnswer().contains("LLM call failed"));
+        assertEquals("LOW", result.getConfidence());
+        assertTrue(result.getCitations().isEmpty());
+        assertTrue(result.isCompleted());
+        assertFalse(result.isSuccess());
     }
 
     private ChatResponse buildResponse(String content) {

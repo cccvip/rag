@@ -3,7 +3,9 @@ package com.core.agent.strategy;
 import com.core.agent.agent.graph.domain.AgentState;
 import com.core.agent.agent.graph.domain.GraphResult;
 import com.core.agent.agent.graph.domain.NodeContext;
+import com.core.agent.agent.strategy.domain.PlanPromptBuilder;
 import com.core.agent.agent.strategy.infrastructure.PlanAndExecuteStrategy;
+import com.core.agent.agent.strategy.infrastructure.PlanStep;
 import com.core.agent.bootstrap.MetricsTracker;
 import com.core.agent.context.application.ContextManager;
 import com.core.agent.guardrail.domain.GuardRail;
@@ -365,6 +367,117 @@ class PlanAndExecuteStrategyTest {
         assertEquals("MEDIUM", result.getFinalState().getVariable("answerConfidence"));
         // 验证只调用了 2 次 LLM：规划 + 最终答案，没有额外的 replan 规划
         assertEquals(2, (int) result.getFinalState().getVariable("llmCallCount"));
+    }
+
+    /**
+     * 测试自定义 prompt builder 可以被注入到策略中。
+     *
+     * <p>验证：业务场景可以在策略外定制自己的 prompt，而策略本身保持通用。</p>
+     */
+    @Test
+    void shouldAllowCustomPromptBuilder() {
+        ToolRegistry registry = new ToolRegistry();
+        registry.register(new Tool() {
+            @Override
+            public String name() {
+                return "retriever";
+            }
+
+            @Override
+            public String description() {
+                return "retrieve relevant documents by query";
+            }
+
+            @Override
+            public RiskLevel riskLevel() {
+                return RiskLevel.LOW;
+            }
+
+            @Override
+            public String execute(String input) {
+                return "[doc-1001] custom builder result";
+            }
+        });
+
+        ChatModel mockModel = new ChatModel() {
+            private final AtomicInteger callCount = new AtomicInteger(0);
+
+            @Override
+            public ChatResponse call(Prompt prompt) {
+                int count = callCount.incrementAndGet();
+                String content;
+
+                if (count == 1) {
+                    content = "[{" +
+                            "\"stepNumber\": 1," +
+                            "\"toolName\": \"retriever\"," +
+                            "\"toolInput\": \"custom query\"," +
+                            "\"purpose\": \"test custom builder\"" +
+                            "}]";
+                } else {
+                    content = "Confidence: HIGH\nCitations: [doc-1001]\nFinal Answer: Answer from custom builder.";
+                }
+                return buildResponse(content);
+            }
+
+            @Override
+            public Flux<ChatResponse> stream(Prompt prompt) {
+                return Flux.empty();
+            }
+
+            @Override
+            public ChatOptions getDefaultOptions() {
+                return null;
+            }
+        };
+
+        MetricsTracker metrics = new MetricsTracker();
+
+        NodeContext context = NodeContext.builder()
+                .chatModel(mockModel)
+                .toolRegistry(registry)
+                .guardRail(new GuardRail())
+                .metricsTracker(metrics)
+                .memoryManager(memoryManager())
+                .contextManager(contextManager())
+                .maxIterations(5)
+                .llmTimeoutSeconds(60)
+                .toolTimeoutSeconds(30)
+                .maxRetries(2)
+                .enableReflection(false)
+                .maxMemoryTokens(2000)
+                .traceContext(NodeContext.Trace.builder()
+                        .traceId("trace-custom-builder-test")
+                        .tenantId("tenant")
+                        .userId("user")
+                        .scene("rag")
+                        .build())
+                .build();
+
+        // 自定义 prompt builder：模拟业务场景的 RAG 专用 prompt
+        PlanPromptBuilder customBuilder = new PlanPromptBuilder() {
+            @Override
+            public String buildPlanPrompt(String query, List<PlanStep> previousPlan, NodeContext ctx) {
+                return "CUSTOM PLAN PROMPT: " + query;
+            }
+
+            @Override
+            public String buildFinalAnswerPrompt(String query, List<PlanStep> plan) {
+                return "CUSTOM FINAL PROMPT: " + query;
+            }
+        };
+
+        PlanAndExecuteStrategy strategy = new PlanAndExecuteStrategy("rag", customBuilder);
+        AgentState initialState = AgentState.initial("trace-custom-builder-test", "tenant", "user", "rag")
+                .withVariable("sessionId", "session-custom-builder-test")
+                .withVariable("query", "Custom builder query")
+                .withCurrentNode("planNode");
+
+        GraphResult result = strategy.compile().execute(initialState, context);
+
+        assertTrue(result.isCompleted(), "Graph should complete with custom builder");
+        assertEquals("Answer from custom builder.", result.getFinalAnswer());
+        assertEquals("HIGH", result.getFinalState().getVariable("answerConfidence"));
     }
 
     private ChatResponse buildResponse(String content) {

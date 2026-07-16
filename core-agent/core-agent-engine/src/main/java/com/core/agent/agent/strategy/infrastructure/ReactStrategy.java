@@ -162,7 +162,10 @@ public class ReactStrategy implements ExecutionStrategy<NodeContext> {
                             metrics.recordLlmCall(0L, 0L, 0L, System.currentTimeMillis() - llmStart);
                             metrics.setTaskSuccess(false);
                         }
-                        return state.completed(errorMsg);
+                        return state.completed(errorMsg)
+                                .withVariable("answerConfidence", "LOW")
+                                .withVariable("answerCitations", java.util.Collections.emptyList())
+                                .withVariable("answerSuccess", false);
                     }
 
                     AgentState stepState = state
@@ -173,6 +176,8 @@ public class ReactStrategy implements ExecutionStrategy<NodeContext> {
                     if (llmOutput.contains("Final Answer:")) {
                         String finalAnswer = llmOutput.substring(
                                 llmOutput.indexOf("Final Answer:") + 13).trim();
+                        java.util.List<String> citations = com.core.agent.agent.domain.AgentResult.extractCitations(finalAnswer);
+                        String confidence = citations.isEmpty() ? "MEDIUM" : "HIGH";
                         if (metrics != null) {
                             metrics.computeCitationAccuracy(finalAnswer);
                             metrics.setTaskSuccess(true);
@@ -181,7 +186,10 @@ public class ReactStrategy implements ExecutionStrategy<NodeContext> {
 
                         recordUsage(ctx, tenantId, sessionId, totalTokens,
                                 System.currentTimeMillis() - requestStart, toolCallCount);
-                        return stepState.completed(finalAnswer);
+                        return stepState.completed(finalAnswer)
+                                .withVariable("answerConfidence", confidence)
+                                .withVariable("answerCitations", citations)
+                                .withVariable("answerSuccess", true);
                     }
 
                     // 6. 解析 Thought / Action / Action Input
@@ -263,7 +271,10 @@ public class ReactStrategy implements ExecutionStrategy<NodeContext> {
                 }
                 recordUsage(ctx, tenantId, sessionId, totalTokens,
                         System.currentTimeMillis() - requestStart, toolCallCount);
-                return state.completed(failureMessage);
+                return state.completed(failureMessage)
+                        .withVariable("answerConfidence", "LOW")
+                        .withVariable("answerCitations", java.util.Collections.emptyList())
+                        .withVariable("answerSuccess", false);
 
             } finally {
                 TraceContextHolder.clear();

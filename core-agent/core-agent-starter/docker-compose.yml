@@ -1,0 +1,14 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: core-agent-qdrant
+    ports:
+      - "6333:6333"   # HTTP / Dashboard
+      - "6334:6334"   # gRPC（Spring AI 默认使用）
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    environment:
+      QDRANT__SERVICE__GRPC_PORT: "6334"
+
+volumes:
+  qdrant_storage:

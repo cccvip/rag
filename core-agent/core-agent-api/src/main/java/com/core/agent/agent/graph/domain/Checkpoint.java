@@ -11,7 +11,7 @@ import java.time.Instant;
  * Agent 执行 checkpoint，用于 HITL 暂停后恢复。
  */
 @Data
-@Builder
+@Builder(toBuilder = true)
 @NoArgsConstructor
 @AllArgsConstructor
 public class Checkpoint {

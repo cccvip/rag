@@ -2,15 +2,32 @@ agent:
   demo:
     enabled: false
 
+rag:
+  retriever:
+    top-k: 5
+
 spring:
   ai:
     openai:
+      # 聊天模型走 DeepSeek（OpenAI 兼容协议）
       api-key: ${DEEPSEEK_API_KEY}
       base-url: https://api.deepseek.com
       chat:
         options:
-          model: deepseek-v4-pro
+          model: deepseek-chat
           temperature: 0.7
+      # Embedding 走 OpenAI 官方或兼容接口
+      embedding:
+        api-key: ${OPENAI_API_KEY}
+        base-url: https://api.openai.com
+        options:
+          model: text-embedding-3-small
+    vectorstore:
+      qdrant:
+        host: localhost
+        port: 6334
+        collection-name: core-agent-docs
+        initialize-schema: true
 
 mcp:
   gateway:
@@ -27,14 +44,14 @@ mcp:
         path: /api/log/query
         method: POST
         risk-level: LOW
-        scene: ops
+        scene: default
       - name: metric_query
         description: "查询指标"
         service: ops-service
         path: /api/metric/query
         method: POST
         risk-level: LOW
-        scene: ops
+        scene: default
       - name: service_restart
         description: "重启服务"
         service: ops-service

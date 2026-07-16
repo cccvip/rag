@@ -194,6 +194,7 @@ public class AgentState {
     /**
      * 只读视图下的消息列表。
      */
+    @com.fasterxml.jackson.annotation.JsonIgnore
     public List<AgentMessage> getMessagesView() {
         return Collections.unmodifiableList(messages);
     }
@@ -201,6 +202,7 @@ public class AgentState {
     /**
      * 只读视图下的变量表。
      */
+    @com.fasterxml.jackson.annotation.JsonIgnore
     public Map<String, Object> getVariablesView() {
         return Collections.unmodifiableMap(variables);
     }
