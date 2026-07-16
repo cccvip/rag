@@ -1,7 +1,7 @@
-# CoreAgent Memory 设计（第一版）
+# CoreAgent Memory 设计（Phase 1~3）
 
-> 本文档定义 CoreAgent 中台服务层的 Memory 模块第一版。  
-> 当前版本聚焦 **工作记忆（Working Memory）**，面向 **QA 助手** 场景，支持多轮会话。
+> 本文档定义 CoreAgent 中台服务层的 Memory 模块演进。  
+> 当前版本覆盖 **工作记忆（Phase 1）**、**持久化 Memory / Checkpoint / HITL（Phase 3）**，面向 **QA 助手** 与 **多 Agent 协同** 场景。
 
 ---
 
@@ -16,7 +16,7 @@
 - **无法区分会话**：多个用户/会话的历史会混在一起
 - **检索重复**：多轮 QA 中，相同或相关的问题会重复调用 Retriever
 
-### 1.2 第一版目标
+### 1.2 Phase 1 目标
 
 - 支持 **QA 助手** 的多轮对话场景
 - 提供 **工作记忆** 能力：保存当前任务执行过程中的关键信息
@@ -25,9 +25,10 @@
 
 ### 1.3 非目标
 
-- 第一版不做长期记忆（跨会话持久化）
-- 第一版不做语义检索（向量召回历史）
-- 第一版不做复杂记忆压缩/摘要
+- Phase 1 不做长期记忆（跨会话持久化）
+- Phase 1 不做语义检索（向量召回历史）
+- Phase 1 不做复杂记忆压缩/摘要
+- Phase 3 仍不做语义向量检索（由后续 RAG VectorStore 承担）
 
 ---
 
@@ -143,7 +144,7 @@ public class MemoryMessage {
 }
 ```
 
-### 4.3 第一版实现
+### 4.3 Phase 1 实现
 
 > **注意**：本实现仅用于原型验证。生产环境请使用 `RedisMemoryStore` 或 `DatabaseMemoryStore`，详见第 7 节。
 
@@ -375,7 +376,7 @@ Agent ReAct:
 
 ## 六、关键设计决策
 
-### 6.1 为什么第一版用内存实现
+### 6.1 为什么 Phase 1 用内存实现
 
 - 简单，不引入 Redis/DB 依赖
 - 适合原型验证和单实例部署
@@ -623,7 +624,7 @@ private String executeToolWithTimeout(Tool tool, String input) throws Exception 
 
 ## 七、生产环境存储层设计
 
-第一版使用内存实现只是为了跑通流程。进入生产环境后，应该抽象出 `MemoryStore` 接口，并支持多种存储后端。
+Phase 1 使用内存实现只是为了跑通流程。进入生产环境后，应该抽象出 `MemoryStore` 接口，并支持多种存储后端。
 
 ### 7.1 MemoryStore 接口
 
@@ -817,29 +818,270 @@ public class CompositeMemoryManager implements MemoryManager {
 
 | 阶段 | 能力 | 说明 |
 |:---|:---|:---|
-| **第一版（当前）** | 工作记忆 + 内存实现 + 评判与反思 | 支持 QA 助手多轮对话，Agent 对中间结果做规则评判，出错时触发 Reflection |
-| **第二版** | Redis 短期记忆 | 生产环境多实例共享会话 |
-| **第三版** | 数据库长期记忆 + 审计 | 持久化、合规、用户画像 |
-| **第四版** | 记忆压缩/摘要 | 对长历史做摘要，减少 Token 占用 |
-| **第五版** | 向量长期记忆 | 语义检索历史，支持更复杂的指代和关联 |
-| **第六版** | 租户隔离完善 | Redis key 前缀 + DB tenant_id 全面落地 |
+| **Phase 1（已完成）** | 工作记忆 + 内存实现 + 评判与反思 | 支持 QA 助手多轮对话，Agent 对中间结果做规则评判，出错时触发 Reflection |
+| **Phase 2（已完成）** | Function Calling + RAG VectorStore + MCP + LLM-as-a-Judge | 标准协议接入与评估 |
+| **Phase 3（已完成）** | 跨 Agent 共享记忆 + 持久化 Checkpoint + HITL | 多 Agent 协同中台，状态可暂停/恢复 |
+| **Phase 4** | Redis 短期记忆 / 向量长期记忆 / 记忆压缩 | 生产级存储与语义召回 |
+| **Phase 5** | 记忆版本管理 / A-B 测试 / 成本配额 | 平台治理与规模化 |
 
 ---
 
-## 十、总结
+## 十、Phase 3：多 Agent 协同中的记忆与状态持久化
 
-> **Memory 是 CoreAgent 中台的重要扩展模块。第一版聚焦工作记忆，面向 QA 助手的多轮对话场景，通过 `MemoryManager` 保存会话历史，由 `ContextManager` 控制 Prompt 长度，从而提升指代消解、减少重复检索、保持对话连贯性。**
+Phase 3 把 Memory 从「单 Agent 会话历史」扩展到「多 Agent 共享记忆」和「执行状态持久化」，支撑 Supervisor + Workers、A2A 远程 Agent、HITL 人工审批等中台能力。
 
-目前已在 `core-agent` 中落地第一版实现：
+### 10.1 新增能力
 
-- `com.example.agent.memory.MemoryManager` / `MemoryStore` 接口
-- `InMemoryMemoryManager` + `InMemoryMemoryStore`（内存原型）
-- `com.example.agent.context.ContextManager` + `ContextStrategy` 上下文窗口管理
-- `DefaultContextStrategy` / `RagContextStrategy` / `OpsContextStrategy` 三种策略
-- `Agent.run(String sessionId, String query)` 支持按会话存取历史
-- `AgentApp` 接入 `JTokkitTokenCountEstimator` 并演示多轮 QA
-- `Agent.evaluateStep(...)` 对中间结果做规则评判
-- `Agent.reflect(...)` 在评判非 OK 时触发 LLM 自我反思，并保存到 Memory
-- LLM 调用和 Tool 执行均支持超时控制与失败重试
+| 能力 | 说明 | 关键类 |
+|:---|:---|:---|
+| **跨 Agent 共享记忆** | 不同 Agent 可按作用域读写同一份上下文 | `SharedMemoryManager` / `SharedMemoryStore` / `MemoryScope` |
+| **持久化 Memory** | 共享记忆可落库，重启不丢失 | `JpaSharedMemoryStore` + `agent_shared_memory` 表 |
+| **Checkpoint 状态持久化** | Agent 执行状态可保存、恢复、人工审批 | `Checkpoint` / `CheckpointStore` / `CheckpointService` |
+| **HITL 人工审批** | Agent 在关键节点暂停，等待人工确认后继续 | `HumanApprovalNode` / `CheckpointController` |
 
-生产环境可按 7.2 节分层架构替换为 `RedisMemoryStore` + `DatabaseMemoryStore`。
+### 10.2 跨 Agent 共享记忆
+
+#### 为什么需要共享记忆
+
+在 Supervisor + Workers 或多 Agent 编排中，多个 Agent 需要看到同一份上下文：
+
+```text
+Supervisor: 把"A 工厂化学品泄漏预案"拆给 Worker-A 检索法规，Worker-B 检索案例
+Worker-A:   需要知道任务主题、约束条件、输出格式
+Worker-B:   同样需要知道任务主题、约束条件、输出格式
+Aggregate:  需要汇总 Worker-A/B 的结果
+```
+
+如果每个 Worker 都只能从自己的 prompt 里获取信息，就需要 Supervisor 在 prompt 里重复拷贝大量上下文。共享记忆让 Worker 在执行前按作用域读取 Supervisor 写好的共享上下文。
+
+#### MemoryScope 作用域设计
+
+共享记忆按四个维度划分作用域：
+
+```java
+public enum MemoryScope {
+    AGENT,   // 单个 Agent 私有
+    SESSION, // 同一次用户会话内共享
+    TENANT,  // 同一租户下所有 Agent 共享
+    USER     // 同一用户跨会话共享
+}
+```
+
+| 作用域 | 典型用法 |
+|:---|:---|
+| `AGENT` | 某个 Agent 的私有系统提示或自我反思 |
+| `SESSION` | 一次用户请求中 Supervisor 与 Workers 共享的上下文 |
+| `TENANT` | 租户级知识，如企业安全规范、术语表 |
+| `USER` | 用户画像，如偏好语言、关注主题 |
+
+#### SharedMemoryMessage 模型
+
+```java
+public class SharedMemoryMessage {
+    private String id;
+    private MemoryScope scope;
+    private String scopeKey;    // 作用域实例：sessionId / tenantId / userId / agentId
+    private String agentId;     // 写入者
+    private String role;        // system / user / assistant / tool
+    private String content;
+    private int tokenCount;
+    private Instant createdAt;
+}
+```
+
+#### SharedMemoryManager 接口
+
+```java
+public interface SharedMemoryManager {
+    void save(SharedMemoryMessage message);
+    List<SharedMemoryMessage> findByScope(MemoryScope scope, String scopeKey,
+                                          String agentId, int limit);
+}
+```
+
+使用方式（在 AgentNode 中）：
+
+```java
+public AgentState invoke(AgentState state, NodeContext ctx) {
+    // 写入共享记忆
+    ctx.getSharedMemoryManager().save(SharedMemoryMessage.builder()
+            .scope(MemoryScope.SESSION)
+            .scopeKey(state.getVariable("sessionId"))
+            .agentId("supervisor")
+            .role("system")
+            .content("任务目标：总结 A 工厂化学品泄漏预案")
+            .build());
+
+    // 读取共享记忆
+    List<SharedMemoryMessage> context = ctx.getSharedMemoryManager()
+            .findByScope(MemoryScope.SESSION, sessionId, "worker-a", 10);
+    // ... 拼入 prompt
+}
+```
+
+#### 持久化实现
+
+- **内存原型**：`InMemorySharedMemoryStore`
+- **生产持久化**：`JpaSharedMemoryStore`（基于 JPA + H2/PostgreSQL/MySQL）
+
+```java
+@Entity
+@Table(name = "agent_shared_memory")
+public class JpaSharedMemoryEntity {
+    @Id
+    private String id;
+    @Enumerated(EnumType.STRING)
+    private MemoryScope scope;
+    private String scopeKey;
+    private String agentId;
+    private String role;
+    private String content;
+    private int tokenCount;
+    private Instant createdAt;
+}
+```
+
+### 10.3 Checkpoint 与状态持久化
+
+#### Checkpoint 模型
+
+```java
+public class Checkpoint {
+    private String token;
+    private AgentState state;
+    private CheckpointDecision decision;
+    private String comment;
+    private Instant createdAt;
+}
+```
+
+状态包括：
+- `PENDING`：等待人工审批
+- `APPROVED`：已批准，可以恢复
+- `REJECTED`：已拒绝，任务终止
+
+#### CheckpointStore SPI
+
+```java
+public interface CheckpointStore {
+    void save(Checkpoint checkpoint);
+    Optional<Checkpoint> find(String token);
+    void updateDecision(String token, CheckpointDecision decision);
+}
+```
+
+实现：
+- `InMemoryCheckpointStore`：内存原型
+- `JpaCheckpointStore`：JPA 持久化，`agent_checkpoint` 表
+
+#### 与 AgentGraph 集成
+
+状态图执行器 `GraphExecutor` 在节点返回 `AWAITING_APPROVAL` 时自动持久化 Checkpoint：
+
+```java
+public GraphResult execute(AgentState initialState) {
+    GraphResult result = graph.execute(initialState, context);
+    if (result.isAwaitingApproval() && checkpointStore != null) {
+        Checkpoint cp = Checkpoint.pending(result.getCheckpointToken(), result.getFinalState());
+        checkpointStore.save(cp);
+    }
+    return result;
+}
+```
+
+恢复执行：
+
+```java
+public GraphResult resume(Checkpoint checkpoint) {
+    return graph.resume(checkpoint, context);
+}
+```
+
+#### HITL 节点
+
+`HumanApprovalNode` 在状态图中创建 checkpoint 并将状态置为 `AWAITING_APPROVAL`：
+
+```java
+public AgentState invoke(AgentState state, NodeContext ctx) {
+    String token = UUID.randomUUID().toString();
+    Checkpoint checkpoint = Checkpoint.pending(token, state
+            .withVariable("approvalPrompt", approvalPrompt)
+            .withVariable("approvalContext", contextHint));
+    checkpointService.save(checkpoint);
+    return state.awaitingApproval(savedToken)
+                .withVariable("checkpointToken", savedToken);
+}
+```
+
+REST 审批入口：
+
+```text
+GET    /checkpoints/{token}
+POST   /checkpoints/{token}/approve
+POST   /checkpoints/{token}/reject
+```
+
+审批后调用 `CheckpointService.approve/reject`，再由 `Agent.resume(checkpoint)` 继续执行。
+
+### 10.4 与单 Agent 工作记忆的关系
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│                        AgentGraph                            │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐     │
+│  │ 单 Agent 记忆 │    │ 共享记忆    │    │ Checkpoint  │     │
+│  │ MemoryManager │    │ SharedMemory │    │  Service    │     │
+│  └──────┬────────┘    └──────┬──────┘    └──────┬──────┘     │
+│         │                    │                  │            │
+│         ▼                    ▼                  ▼            │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐     │
+│  │ InMemory    │    │ InMemory    │    │ InMemory    │     │
+│  │ MemoryStore │    │ SharedMemory│    │ Checkpoint  │     │
+│  │             │    │ Store       │    │ Store       │     │
+│  └─────────────┘    └─────────────┘    └─────────────┘     │
+│         │                    │                  │            │
+│         └────────────────────┴──────────────────┘            │
+│                              │                               │
+│                              ▼                               │
+│                    JPA / Redis 持久化                        │
+└─────────────────────────────────────────────────────────────┘
+```
+
+- **MemoryManager**：面向单 Agent 会话，保存对话历史
+- **SharedMemoryManager**：面向多 Agent，按作用域共享上下文
+- **Checkpoint**：面向状态图，保存执行快照，支持暂停/恢复/审批
+
+三者互补，共同支撑 Phase 3 的多 Agent 协同中台。
+
+### 10.5 生产建议
+
+| 组件 | 原型实现 | 生产建议 |
+|:---|:---|:---|
+| `MemoryStore` | `InMemoryMemoryStore` | Redis / Database |
+| `SharedMemoryStore` | `InMemorySharedMemoryStore` | `JpaSharedMemoryStore` + PostgreSQL |
+| `CheckpointStore` | `InMemoryCheckpointStore` | `JpaCheckpointStore` + PostgreSQL |
+| Token 估算 | `JTokkitTokenCountEstimator` | 继续沿用，实际计费以模型返回 Usage 为准 |
+
+持久化表已定义：
+- `agent_shared_memory`：跨 Agent 共享记忆
+- `agent_checkpoint`：Checkpoint 与 HITL 审批记录
+
+### 10.6 代码位置
+
+- `core-agent-api`：`MemoryScope`、`SharedMemoryMessage`、`Checkpoint`、`CheckpointStore`、`SharedMemoryStore`、`AgentRegistry`
+- `core-agent-runtime`：`InMemoryMemoryStore`、`InMemorySharedMemoryStore`、`InMemoryCheckpointStore`
+- `core-agent-engine`：`Agent.run(AgentState)`、`Agent.resume(Checkpoint)`、`GraphExecutor`、`HumanApprovalNode`
+- `core-agent-starter`：`JpaSharedMemoryStore`、`JpaCheckpointStore`、`SharedMemoryManager`、`CheckpointController`、`AgentExecutionController`
+
+---
+
+## 十一、总结
+
+> **Memory 是 CoreAgent 中台的重要扩展模块。**
+>
+> - **Phase 1** 聚焦工作记忆，通过 `MemoryManager` 保存会话历史，`ContextManager` 控制 Prompt 长度，提升多轮 QA 的连贯性。
+> - **Phase 3** 扩展到跨 Agent 共享记忆和状态持久化：`SharedMemoryManager` 让 Supervisor/Workers/A2A Agent 共享上下文，`Checkpoint` + `HumanApprovalNode` 支持执行状态暂停、人工审批与恢复。
+>
+> 持久化实现统一放在 `core-agent-starter`，底层模块只保留 SPI 与内存原型，便于生产环境替换为 Redis / PostgreSQL / MySQL。
+
+生产环境可按 7.2 节分层架构替换为 `RedisMemoryStore` + `DatabaseMemoryStore`，并把 `JpaSharedMemoryStore` / `JpaCheckpointStore` 的后端从 H2 切到 PostgreSQL。
