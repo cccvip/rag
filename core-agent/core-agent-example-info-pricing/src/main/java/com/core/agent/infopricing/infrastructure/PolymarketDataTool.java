@@ -4,7 +4,8 @@ import com.core.agent.infopricing.application.InfoPricingProperties;
 import com.core.agent.infopricing.domain.MarketDataPoint;
 import com.core.agent.shared.model.RiskLevel;
 import com.core.agent.tool.domain.Tool;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.gson.Gson;
+import com.google.gson.reflect.TypeToken;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
@@ -33,11 +34,11 @@ public class PolymarketDataTool implements Tool {
             .connectTimeout(Duration.ofSeconds(10))
             .build();
 
-    private final ObjectMapper objectMapper;
+    private final Gson gson;
     private final boolean mockEnabled;
 
-    public PolymarketDataTool(ObjectMapper objectMapper, InfoPricingProperties properties) {
-        this.objectMapper = objectMapper;
+    public PolymarketDataTool(Gson gson, InfoPricingProperties properties) {
+        this.gson = gson;
         this.mockEnabled = properties.isMockEnabled();
     }
 
@@ -60,7 +61,7 @@ public class PolymarketDataTool implements Tool {
     public String execute(String input) {
         try {
             List<MarketDataPoint> points = mockEnabled ? mockData() : fetchFromApi(input);
-            return objectMapper.writeValueAsString(points);
+            return gson.toJson(points);
         } catch (Exception e) {
             return "Error: " + e.getMessage();
         }

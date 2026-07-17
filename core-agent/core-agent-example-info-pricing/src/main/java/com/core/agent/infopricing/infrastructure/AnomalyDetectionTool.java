@@ -4,8 +4,8 @@ import com.core.agent.infopricing.domain.AnomalyPoint;
 import com.core.agent.infopricing.domain.MarketDataPoint;
 import com.core.agent.shared.model.RiskLevel;
 import com.core.agent.tool.domain.Tool;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.gson.Gson;
+import com.google.gson.reflect.TypeToken;
 import org.apache.commons.math3.stat.descriptive.DescriptiveStatistics;
 import org.springframework.stereotype.Component;
 
@@ -22,10 +22,10 @@ import java.util.List;
 @Component
 public class AnomalyDetectionTool implements Tool {
 
-    private final ObjectMapper objectMapper;
+    private final Gson gson;
 
-    public AnomalyDetectionTool(ObjectMapper objectMapper) {
-        this.objectMapper = objectMapper;
+    public AnomalyDetectionTool(Gson gson) {
+        this.gson = gson;
     }
 
     @Override
@@ -46,10 +46,10 @@ public class AnomalyDetectionTool implements Tool {
     @Override
     public String execute(String input) {
         try {
-            List<MarketDataPoint> points = objectMapper.readValue(input, new TypeReference<>() {
-            });
+            List<MarketDataPoint> points = gson.fromJson(input, new TypeToken<List<MarketDataPoint>>() {
+            }.getType());
             List<AnomalyPoint> anomalies = detect(points);
-            return objectMapper.writeValueAsString(anomalies);
+            return gson.toJson(anomalies);
         } catch (Exception e) {
             return "Error: " + e.getMessage();
         }

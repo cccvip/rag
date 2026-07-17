@@ -14,10 +14,10 @@ import com.core.agent.infopricing.infrastructure.PolymarketDataTool;
 import com.core.agent.infopricing.infrastructure.ReportGenerationTool;
 import com.core.agent.infopricing.interfaces.AnalyzeRequest;
 import com.core.agent.tool.domain.ToolRegistry;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.SerializationFeature;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import com.google.gson.Gson;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonParser;
+import com.google.gson.reflect.TypeToken;
 import lombok.SneakyThrows;
 import org.springframework.stereotype.Service;
 
@@ -44,21 +44,20 @@ public class InfoPricingService {
     private final NewsAttributionTool newsAttributionTool;
     private final ReportGenerationTool reportGenerationTool;
     private final InfoPricingProperties properties;
-    private final ObjectMapper objectMapper;
+    private final Gson gson;
 
     public InfoPricingService(PolymarketDataTool polymarketDataTool,
                               AnomalyDetectionTool anomalyDetectionTool,
                               NewsAttributionTool newsAttributionTool,
                               ReportGenerationTool reportGenerationTool,
-                              InfoPricingProperties properties) {
+                              InfoPricingProperties properties,
+                              Gson gson) {
         this.polymarketDataTool = polymarketDataTool;
         this.anomalyDetectionTool = anomalyDetectionTool;
         this.newsAttributionTool = newsAttributionTool;
         this.reportGenerationTool = reportGenerationTool;
         this.properties = properties;
-        this.objectMapper = new ObjectMapper()
-                .registerModule(new JavaTimeModule())
-                .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+        this.gson = gson;
     }
 
     @SneakyThrows
@@ -106,12 +105,12 @@ public class InfoPricingService {
 
         return PricingTimeline.builder()
                 .marketName(request.getMarketName())
-                .marketData(objectMapper.readValue((String) result.getFinalState().getVariable("marketData"), new TypeReference<List<MarketDataPoint>>() {
-                }))
-                .anomalies(objectMapper.readValue((String) result.getFinalState().getVariable("anomalies"), new TypeReference<List<AnomalyPoint>>() {
-                }))
-                .attributions(objectMapper.readValue((String) result.getFinalState().getVariable("attributions"), new TypeReference<List<PricingTimeline.Attribution>>() {
-                }))
+                .marketData(gson.fromJson((String) result.getFinalState().getVariable("marketData"), new TypeToken<List<MarketDataPoint>>() {
+                }.getType()))
+                .anomalies(gson.fromJson((String) result.getFinalState().getVariable("anomalies"), new TypeToken<List<AnomalyPoint>>() {
+                }.getType()))
+                .attributions(gson.fromJson((String) result.getFinalState().getVariable("attributions"), new TypeToken<List<PricingTimeline.Attribution>>() {
+                }.getType()))
                 .report(result.getFinalAnswer())
                 .build();
     }
@@ -127,7 +126,8 @@ public class InfoPricingService {
         public AgentState invoke(AgentState state, NodeContext ctx) {
             String marketId = state.getVariable("marketId");
             String dataJson = polymarketDataTool.execute(marketId);
-            return state.withVariable("marketData", objectMapper.readTree(dataJson).toString());
+            JsonElement element = JsonParser.parseString(dataJson);
+            return state.withVariable("marketData", gson.toJson(element));
         }
     }
 
@@ -142,7 +142,8 @@ public class InfoPricingService {
         public AgentState invoke(AgentState state, NodeContext ctx) {
             String marketData = state.getVariable("marketData");
             String anomaliesJson = anomalyDetectionTool.execute(marketData);
-            return state.withVariable("anomalies", objectMapper.readTree(anomaliesJson).toString());
+            JsonElement element = JsonParser.parseString(anomaliesJson);
+            return state.withVariable("anomalies", gson.toJson(element));
         }
     }
 
@@ -168,12 +169,13 @@ public class InfoPricingService {
                     .toList();
 
             NewsAttributionTool.AttributionInput input = new NewsAttributionTool.AttributionInput();
-            input.setAnomalies(objectMapper.readValue(anomalies, new TypeReference<List<AnomalyPoint>>() {
-            }));
+            input.setAnomalies(gson.fromJson(anomalies, new TypeToken<List<AnomalyPoint>>() {
+            }.getType()));
             input.setEvents(events);
 
-            String attributionJson = newsAttributionTool.execute(objectMapper.writeValueAsString(input));
-            return state.withVariable("attributions", objectMapper.readTree(attributionJson).toString());
+            String attributionJson = newsAttributionTool.execute(gson.toJson(input));
+            JsonElement element = JsonParser.parseString(attributionJson);
+            return state.withVariable("attributions", gson.toJson(element));
         }
     }
 
@@ -188,14 +190,14 @@ public class InfoPricingService {
         public AgentState invoke(AgentState state, NodeContext ctx) {
             ReportGenerationTool.ReportInput input = new ReportGenerationTool.ReportInput();
             input.setMarketName(state.getVariable("marketName"));
-            input.setMarketData(objectMapper.readValue((String) state.getVariable("marketData"), new TypeReference<List<MarketDataPoint>>() {
-            }));
-            input.setAnomalies(objectMapper.readValue((String) state.getVariable("anomalies"), new TypeReference<List<AnomalyPoint>>() {
-            }));
-            input.setAttributions(objectMapper.readValue((String) state.getVariable("attributions"), new TypeReference<List<PricingTimeline.Attribution>>() {
-            }));
+            input.setMarketData(gson.fromJson((String) state.getVariable("marketData"), new TypeToken<List<MarketDataPoint>>() {
+            }.getType()));
+            input.setAnomalies(gson.fromJson((String) state.getVariable("anomalies"), new TypeToken<List<AnomalyPoint>>() {
+            }.getType()));
+            input.setAttributions(gson.fromJson((String) state.getVariable("attributions"), new TypeToken<List<PricingTimeline.Attribution>>() {
+            }.getType()));
 
-            String report = reportGenerationTool.execute(objectMapper.writeValueAsString(input));
+            String report = reportGenerationTool.execute(gson.toJson(input));
             return state.withVariable("finalAnswer", report);
         }
     }

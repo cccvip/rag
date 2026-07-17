@@ -5,8 +5,8 @@ import com.core.agent.infopricing.domain.MarketDataPoint;
 import com.core.agent.infopricing.domain.PricingTimeline;
 import com.core.agent.shared.model.RiskLevel;
 import com.core.agent.tool.domain.Tool;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.gson.Gson;
+import com.google.gson.reflect.TypeToken;
 import lombok.Data;
 import org.springframework.stereotype.Component;
 
@@ -21,13 +21,13 @@ import java.util.List;
 @Component
 public class ReportGenerationTool implements Tool {
 
-    private final ObjectMapper objectMapper;
+    private final Gson gson;
     private static final DateTimeFormatter FORMATTER = DateTimeFormatter
             .ofPattern("yyyy-MM-dd HH:mm:ss")
             .withZone(ZoneId.systemDefault());
 
-    public ReportGenerationTool(ObjectMapper objectMapper) {
-        this.objectMapper = objectMapper;
+    public ReportGenerationTool(Gson gson) {
+        this.gson = gson;
     }
 
     @Override
@@ -48,7 +48,7 @@ public class ReportGenerationTool implements Tool {
     @Override
     public String execute(String input) {
         try {
-            ReportInput reportInput = objectMapper.readValue(input, ReportInput.class);
+            ReportInput reportInput = gson.fromJson(input, ReportInput.class);
             return generateMarkdown(reportInput);
         } catch (Exception e) {
             return "Error: " + e.getMessage();

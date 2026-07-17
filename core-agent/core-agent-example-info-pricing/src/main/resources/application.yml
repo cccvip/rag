@@ -1,5 +1,6 @@
 info-pricing:
   mock-enabled: true
+  attribution-mock-enabled: true
   anomaly-threshold: 1.5
   events:
     - timestamp: "2024-07-13T18:25:00Z"
@@ -16,6 +17,9 @@ info-pricing:
       category: "golden_boot"
 
 spring:
+  mvc:
+    converters:
+      preferred-json-mapper: gson
   ai:
     openai:
       # 复用 DeepSeek OpenAI 兼容接口

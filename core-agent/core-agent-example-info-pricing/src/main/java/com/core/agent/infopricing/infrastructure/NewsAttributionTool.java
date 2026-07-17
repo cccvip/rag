@@ -5,13 +5,13 @@ import com.core.agent.infopricing.domain.AnomalyPoint;
 import com.core.agent.infopricing.domain.PricingTimeline;
 import com.core.agent.shared.model.RiskLevel;
 import com.core.agent.tool.domain.Tool;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.gson.Gson;
+import com.google.gson.reflect.TypeToken;
 import lombok.Data;
 import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.chat.prompt.SystemPromptTemplate;
-import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
@@ -26,13 +26,13 @@ import java.util.List;
 public class NewsAttributionTool implements Tool {
 
     private final ChatModel chatModel;
-    private final ObjectMapper objectMapper;
+    private final Gson gson;
     private final boolean mockEnabled;
 
-    public NewsAttributionTool(ChatModel chatModel, ObjectMapper objectMapper,
+    public NewsAttributionTool(ChatModel chatModel, Gson gson,
                                InfoPricingProperties properties) {
         this.chatModel = chatModel;
-        this.objectMapper = objectMapper;
+        this.gson = gson;
         this.mockEnabled = properties.isAttributionMockEnabled();
     }
 
@@ -54,7 +54,7 @@ public class NewsAttributionTool implements Tool {
     @Override
     public String execute(String input) {
         try {
-            AttributionInput attributionInput = objectMapper.readValue(input, AttributionInput.class);
+            AttributionInput attributionInput = gson.fromJson(input, AttributionInput.class);
 
             if (mockEnabled) {
                 return mockAttribution(attributionInput.getAnomalies(), attributionInput.getEvents());
@@ -85,8 +85,8 @@ public class NewsAttributionTool implements Tool {
 
                     请输出 JSON 数组。不要输出 markdown 代码块，只输出 JSON。
                     """,
-                    objectMapper.writeValueAsString(attributionInput.getAnomalies()),
-                    objectMapper.writeValueAsString(attributionInput.getEvents()));
+                    gson.toJson(attributionInput.getAnomalies()),
+                    gson.toJson(attributionInput.getEvents()));
 
             SystemPromptTemplate systemTemplate = new SystemPromptTemplate(systemPrompt);
             Prompt prompt = new Prompt(systemTemplate.createMessage(), new UserMessage(userPrompt));
@@ -102,7 +102,7 @@ public class NewsAttributionTool implements Tool {
         }
     }
 
-    private String mockAttribution(List<AnomalyPoint> anomalies, List<NewsEventInput> events) throws Exception {
+    private String mockAttribution(List<AnomalyPoint> anomalies, List<NewsEventInput> events) {
         List<PricingTimeline.Attribution> result = anomalies.stream()
                 .map(a -> {
                     NewsEventInput matched = events.stream()
@@ -120,7 +120,7 @@ public class NewsAttributionTool implements Tool {
                             .build();
                 })
                 .toList();
-        return objectMapper.writeValueAsString(result);
+        return gson.toJson(result);
     }
 
     @Data
