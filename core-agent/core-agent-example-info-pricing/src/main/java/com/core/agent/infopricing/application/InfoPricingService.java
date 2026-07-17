@@ -126,6 +126,9 @@ public class InfoPricingService {
         public AgentState invoke(AgentState state, NodeContext ctx) {
             String marketId = state.getVariable("marketId");
             String dataJson = polymarketDataTool.execute(marketId);
+            if (dataJson.startsWith("Error:")) {
+                throw new RuntimeException(dataJson);
+            }
             JsonElement element = JsonParser.parseString(dataJson);
             return state.withVariable("marketData", gson.toJson(element));
         }
@@ -142,6 +145,9 @@ public class InfoPricingService {
         public AgentState invoke(AgentState state, NodeContext ctx) {
             String marketData = state.getVariable("marketData");
             String anomaliesJson = anomalyDetectionTool.execute(marketData);
+            if (anomaliesJson.startsWith("Error:")) {
+                throw new RuntimeException(anomaliesJson);
+            }
             JsonElement element = JsonParser.parseString(anomaliesJson);
             return state.withVariable("anomalies", gson.toJson(element));
         }
@@ -174,6 +180,9 @@ public class InfoPricingService {
             input.setEvents(events);
 
             String attributionJson = newsAttributionTool.execute(gson.toJson(input));
+            if (attributionJson.startsWith("Error:")) {
+                throw new RuntimeException(attributionJson);
+            }
             JsonElement element = JsonParser.parseString(attributionJson);
             return state.withVariable("attributions", gson.toJson(element));
         }
@@ -198,6 +207,9 @@ public class InfoPricingService {
             }.getType()));
 
             String report = reportGenerationTool.execute(gson.toJson(input));
+            if (report.startsWith("Error:")) {
+                throw new RuntimeException(report);
+            }
             return state.withVariable("finalAnswer", report);
         }
     }
