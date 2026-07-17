@@ -25,6 +25,7 @@
         <module>core-agent-runtime</module>
         <module>core-agent-engine</module>
         <module>core-agent-starter</module>
+        <module>core-agent-example-info-pricing</module>
     </modules>
 
     <properties>

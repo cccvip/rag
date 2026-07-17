@@ -1,0 +1,30 @@
+info-pricing:
+  mock-enabled: true
+  anomaly-threshold: 1.5
+  events:
+    - timestamp: "2024-07-13T18:25:00Z"
+      title: "英格兰首发名单公布，凯恩、福登、贝林厄姆全部首发"
+      description: "赛前一小时公布首发，英格兰排出最强攻击线，市场对其胜率预期上升。"
+      category: "lineup"
+    - timestamp: "2024-07-13T19:15:00Z"
+      title: "法国队轮换传闻：格列兹曼可能替补"
+      description: "赛前传闻法国中场核心格列兹曼身体不适，可能无法首发。"
+      category: "rumor"
+    - timestamp: "2024-07-13T20:30:00Z"
+      title: "凯恩金靴赔率持续走低"
+      description: "随着淘汰赛进行，凯恩成为本届赛事金靴最大热门，吸引资金流入英格兰相关市场。"
+      category: "golden_boot"
+
+spring:
+  ai:
+    openai:
+      # 复用 DeepSeek OpenAI 兼容接口
+      api-key: ${DEEPSEEK_API_KEY}
+      base-url: https://api.deepseek.com
+      chat:
+        options:
+          model: deepseek-chat
+          temperature: 0.3
+
+server:
+  port: 8085
