@@ -16,7 +16,9 @@ import static org.assertj.core.api.Assertions.assertThat;
         "spring.ai.openai.api-key=test-key",
         "spring.ai.openai.base-url=https://api.deepseek.com",
         "spring.ai.openai.chat.options.model=deepseek-chat",
-        "info-pricing.attribution-mock-enabled=true"
+        "info-pricing.mock-enabled=true",
+        "info-pricing.attribution-mock-enabled=true",
+        "info-pricing.news-search-mock-enabled=true"
 })
 class InfoPricingServiceTest {
 
